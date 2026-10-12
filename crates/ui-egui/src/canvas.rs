@@ -890,9 +890,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         let in_active = active_vp.as_ref().is_some_and(|v| active_clip.as_ref().map_or(in_rect(v), |c| c.contains(pp)));
         if !in_active {
             app.canvas.hot_grips.clear();
+            app.session.pending_window = None;
+            app.canvas.drag_window = false;
             if app.run("mspace", serde_json::json!({"at": [pp.x, pp.y]})).is_err() && active_vp.is_some() {
                 let _ = app.run("pspace", serde_json::json!({}));
             }
+            app.session.pending_window = None;
+            app.canvas.drag_window = false;
             app.canvas.list = None;
             return;
         }
@@ -949,7 +953,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             None => app.cmd.options = None,
         }
     }
-    let pressed_primary = pressed_primary && !picked;
+    if dbl_primary {
+        app.session.pending_window = None;
+        app.canvas.drag_window = false;
+    }
+    let pressed_primary = pressed_primary && !picked && !dbl_primary;
     // Clicks.
     if inside
         && pressed_primary
