@@ -234,12 +234,19 @@ impl DocState {
                 let height = vp.height * k;
                 let doc = Arc::make_mut(&mut self.doc);
                 if let Some(store) = doc.space_mut(&self.space.clone()) {
+                    let mut changed = false;
                     store.modify(h, |e| {
-                        if let cadcraft_doc::EntityKind::Viewport(x) = &mut e.kind {
+                        if let cadcraft_doc::EntityKind::Viewport(x) = &mut e.kind
+                            && (x.view_center != center || x.view_height != height)
+                        {
                             x.view_center = center;
                             x.view_height = height;
+                            changed = true;
                         }
                     });
+                    if changed {
+                        self.revision += 1;
+                    }
                 }
             }
             return;

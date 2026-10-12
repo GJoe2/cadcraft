@@ -89,3 +89,20 @@ fn zoom_in_a_locked_viewport_or_on_the_model_tab_is_unchanged() {
     s.cmdline("zoom 2xp").unwrap();
     assert!((s.state().unwrap().view().height - v.height / 2.0).abs() < 1e-9);
 }
+
+#[test]
+fn pan_and_zoom_in_unlocked_viewport_bumps_revision() {
+    let (mut s, _h) = session();
+    let rev0 = s.state().unwrap().revision;
+
+    // Pan changes viewport view_center and bumps revision
+    s.cmdline("pan 10,0 0,0").unwrap();
+    let rev1 = s.state().unwrap().revision;
+    assert!(rev1 > rev0, "pan in unlocked viewport must bump revision");
+
+    // Realtime pan/zoom (set_view_quiet) also bumps revision
+    let v = s.state().unwrap().view();
+    s.state_mut().unwrap().set_view_quiet(cadcraft_engine::View { center: v.center + cadcraft_geom::Vec2::new(5.0, 5.0), height: v.height });
+    let rev2 = s.state().unwrap().revision;
+    assert!(rev2 > rev1, "set_view_quiet in unlocked viewport must bump revision");
+}
