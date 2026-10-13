@@ -36,6 +36,17 @@ pub struct ClipSource {
     pub serial: u64,
 }
 
+/// A raster image payload held on the clipboard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipboardImage {
+    /// PNG or raw image bytes.
+    pub bytes: Arc<Vec<u8>>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
 /// Put copies of `ents` from the active drawing on the clipboard, with `base` as base point.
 pub(crate) fn copy(s: &mut Session, ents: Vec<Entity>, base: Vec2) -> Result<()> {
     let uid = s.state()?.uid;
@@ -48,13 +59,46 @@ fn set(s: &mut Session, ents: Vec<Entity>, base: Vec2, defs: Drawing, uid: Optio
     let serial = s.clipboard_source.as_ref().map_or(0, |c| c.serial).wrapping_add(1);
     s.clipboard = ents;
     s.clipboard_base = base;
+    s.clipboard_image = None;
     s.clipboard_source = Some(ClipSource { uid, defs: Arc::new(defs), serial });
 }
 
 /// Enabled check of PASTECLIP and PASTEBLOCK: something to paste.
 pub(crate) fn has_clip(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
-    if s.clipboard.is_empty() { Err("the clipboard is empty".into()) } else { Ok(()) }
+    if s.clipboard.is_empty() && s.clipboard_image.is_none() { Err("the clipboard is empty".into()) } else { Ok(()) }
+}
+
+/// Paste a clipboard image at insertion point `at`.
+pub(crate) fn paste_image(s: &mut Session, at: Vec2, scale: Option<f64>) -> Result<Handle> {
+    let img = s.clipboard_image.clone().ok_or_else(|| bad("pasteclip", "no image on clipboard"))?;
+    use std::hash::{DefaultHasher, Hasher};
+    let mut hasher = DefaultHasher::new();
+    hasher.write(&img.bytes);
+    let hash = hasher.finish();
+    let key = format!("paste_{hash:016x}.png");
+
+    let space = s.space();
+    let d = s.doc_mut()?;
+    d.store_image_asset(&key, (*img.bytes).clone());
+    let scale = scale.unwrap_or(1.0).max(1e-9);
+    let image_ent = cadcraft_doc::Image {
+        insert: at.to3(0.0),
+        u: Vec2::new(scale, 0.0).to3(0.0),
+        v: Vec2::new(0.0, scale).to3(0.0),
+        size: Vec2::new(img.width as f64, img.height as f64),
+        path: key.clone(),
+        name: key,
+        ..cadcraft_doc::Image::default()
+    };
+    let h = d.new_handle();
+    let e = Entity::new(h, EntityKind::Image(image_ent));
+    d.ensure_layer(&e.common.layer);
+    if let Some(st) = d.space_mut(&space) {
+        st.push(e);
+    }
+    s.set_selection(vec![h]);
+    Ok(h)
 }
 
 /// Enabled check of PASTEORIG: as in AutoCAD, it pastes objects copied from another drawing.

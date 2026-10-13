@@ -663,6 +663,8 @@ pub struct Session {
     pub last_used: LastUsed,
     /// Where `clipboard` came from and the layers, styles and blocks its objects need.
     pub clipboard_source: Option<cmd::clipboard::ClipSource>,
+    /// A raster image payload on the clipboard.
+    pub clipboard_image: Option<cmd::clipboard::ClipboardImage>,
     /// The window last picked with PLOTWINDOW (the Plot dialog's "Window <").
     pub plot_window: Option<cadcraft_geom::Bounds2>,
     /// AutoLISP: each drawing's symbols and the routine running ([`lisp`]).
@@ -715,12 +717,22 @@ impl Session {
             last_dim: None,
             last_used: LastUsed::default(),
             clipboard_source: None,
+            clipboard_image: None,
             plot_window: None,
             lisp: lisp::LispState::default(),
             lisp_last: None,
             hatch_picks: None,
         }
     }
+
+    /// Put a raster image payload onto the clipboard.
+    pub fn set_clipboard_image(&mut self, bytes: Vec<u8>, width: u32, height: u32) {
+        self.clipboard = Vec::new();
+        self.clipboard_base = Vec2::ZERO;
+        self.clipboard_source = None;
+        self.clipboard_image = Some(cmd::clipboard::ClipboardImage { bytes: std::sync::Arc::new(bytes), width, height });
+    }
+
     pub fn new_drawing(&mut self, metric: bool) -> usize {
         self.untitled_counter += 1;
         let d = if metric { Drawing::new_metric() } else { Drawing::new_imperial() };
@@ -775,6 +787,10 @@ impl Session {
     }
     pub fn doc(&self) -> Result<&Drawing> {
         Ok(&self.state()?.doc)
+    }
+    /// The file path of the active drawing, if known.
+    pub fn drawing_path(&self) -> Option<String> {
+        self.state().ok().and_then(|s| s.path.clone())
     }
     /// Copy-on-write access to the drawing.
     pub fn doc_mut(&mut self) -> Result<&mut Drawing> {

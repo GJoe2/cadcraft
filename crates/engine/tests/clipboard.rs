@@ -212,3 +212,28 @@ fn clipboard_travels_as_text() {
     assert!(t.doc().unwrap().block("DOOR").is_some() && t.doc().unwrap().layer("HINGE").is_some());
     let _ = a;
 }
+
+#[test]
+fn clipboard_pastes_raster_image() {
+    let mut s = Session::new();
+    let fake_png = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+    s.set_clipboard_image(fake_png.clone(), 640, 480);
+
+    let r = s.execute("pasteclip", &json!({ "at": [100.0, 50.0], "scale": 2.0 })).unwrap();
+    let hs = r["handles"].as_array().unwrap();
+    assert_eq!(hs.len(), 1);
+
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.model.len(), 1);
+    let ent = doc.model.iter().next().unwrap();
+    if let EntityKind::Image(img) = &ent.kind {
+        assert_eq!(img.insert, Vec3::new(100.0, 50.0, 0.0));
+        assert_eq!(img.size, Vec2::new(640.0, 480.0));
+        assert_eq!(img.u, Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(img.v, Vec3::new(0.0, 2.0, 0.0));
+        assert!(doc.get_image_asset(&img.path).is_some());
+        assert_eq!(*doc.get_image_asset(&img.path).unwrap(), fake_png);
+    } else {
+        panic!("expected Image entity");
+    }
+}

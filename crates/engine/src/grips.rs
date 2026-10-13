@@ -104,8 +104,41 @@ pub fn stretch_grip(kind: &EntityKind, index: usize, to: Vec2) -> Option<EntityK
             1 => return Some(translated(kind, delta)),
             _ => set_xy(&mut l.b, to),
         },
-        EntityKind::Point(_) | EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::AttDef(_) | EntityKind::Image(_) | EntityKind::Table(_) => {
+        EntityKind::Point(_) | EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::AttDef(_) | EntityKind::Table(_) => {
             return Some(translated(kind, delta));
+        }
+        EntityKind::Image(img) => {
+            let corners = img.corners();
+            if index == 4 {
+                return Some(translated(kind, delta));
+            } else if index == 5 {
+                let center = (corners[0] + corners[2]) * 0.5;
+                let v_orig = from - center;
+                let v_new = to - center;
+                if v_orig.len() < 1e-9 || v_new.len() < 1e-9 {
+                    return None;
+                }
+                let angle = center.angle_to(to) - center.angle_to(from);
+                let m = Mat3::rotate_about(center, angle);
+                img.transform(&m);
+            } else if index < 4 {
+                let fixed = corners[(index + 2) % 4];
+                let d_orig = from - fixed;
+                let d_new = to - fixed;
+                let len_orig = d_orig.len();
+                if len_orig < 1e-9 {
+                    return None;
+                }
+                let proj = d_new.dot(d_orig.normalized());
+                let scale = proj / len_orig;
+                if scale <= 1e-6 || !scale.is_finite() {
+                    return None;
+                }
+                let m = Mat3::scale_about(fixed, scale);
+                img.transform(&m);
+            } else {
+                return None;
+            }
         }
         EntityKind::Hatch(_) | EntityKind::Tolerance(_) => return Some(translated(kind, delta)),
         EntityKind::Circle(c) => {
@@ -324,6 +357,10 @@ pub enum GripAction {
     Lengthen,
     /// Arc midpoint: change the radius, keeping the center and angles.
     Radius,
+    /// Image: scale the image about the grip.
+    Scale,
+    /// Image: rotate the image about the grip.
+    Rotate,
 }
 
 impl GripAction {
@@ -336,6 +373,8 @@ impl GripAction {
             GripAction::ToLine => "conVert to line",
             GripAction::Lengthen => "Lengthen",
             GripAction::Radius => "Radius",
+            GripAction::Scale => "Scale",
+            GripAction::Rotate => "Rotate",
         }
     }
     /// The grip menu label.
@@ -347,6 +386,8 @@ impl GripAction {
             GripAction::ToLine => "Convert to Line",
             GripAction::Lengthen => "Lengthen",
             GripAction::Radius => "Radius",
+            GripAction::Scale => "Scale",
+            GripAction::Rotate => "Rotate",
         }
     }
     /// The mode name on the command line ("** ADD VERTEX **").
@@ -358,6 +399,8 @@ impl GripAction {
             GripAction::ToLine => "** CONVERT TO LINE **",
             GripAction::Lengthen => "** LENGTHEN **",
             GripAction::Radius => "** RADIUS **",
+            GripAction::Scale => "** SCALE **",
+            GripAction::Rotate => "** ROTATE **",
         }
     }
     /// Whether the option needs a point (or value); the others act at once.
@@ -383,6 +426,8 @@ pub fn grip_actions(kind: &EntityKind, index: usize) -> Vec<GripAction> {
         EntityKind::Line(_) if index == 0 || index == 2 => vec![GripAction::Lengthen],
         EntityKind::Arc(_) if index == 0 || index == 2 => vec![GripAction::Lengthen],
         EntityKind::Arc(_) if index == 1 => vec![GripAction::Radius],
+        EntityKind::Image(_) if index < 4 => vec![GripAction::Scale, GripAction::Rotate],
+        EntityKind::Image(_) if index == 5 => vec![GripAction::Rotate, GripAction::Scale],
         _ => Vec::new(),
     }
 }
@@ -486,6 +531,41 @@ pub fn grip_action(kind: &EntityKind, index: usize, action: GripAction, to: Opti
                 return None;
             }
             a.radius = r;
+        }
+        (EntityKind::Image(img), GripAction::Scale) => {
+            let base = *kind.grips().get(index)?;
+            let scale = match (value, to) {
+                (Some(v), _) => v,
+                (None, Some(p)) => {
+                    let d = base.dist(p);
+                    if d <= EPS {
+                        return None;
+                    }
+                    d / 100.0
+                }
+                _ => return None,
+            };
+            if scale <= 1e-6 || !scale.is_finite() {
+                return None;
+            }
+            let m = Mat3::scale_about(base, scale);
+            img.transform(&m);
+        }
+        (EntityKind::Image(img), GripAction::Rotate) => {
+            let base = *kind.grips().get(index)?;
+            let angle = match (value, to) {
+                (Some(v), _) => v.to_radians(),
+                (None, Some(p)) => {
+                    let d = base.dist(p);
+                    if d <= EPS {
+                        return None;
+                    }
+                    base.angle_to(p)
+                }
+                _ => return None,
+            };
+            let m = Mat3::rotate_about(base, angle);
+            img.transform(&m);
         }
         _ => return None,
     }

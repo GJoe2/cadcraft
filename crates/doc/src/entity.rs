@@ -907,6 +907,30 @@ impl Default for Image {
         }
     }
 }
+
+impl Image {
+    /// Create a new image entity placed at `insert` with pixel vectors, dimensions, and path.
+    pub fn new(insert: Vec3, u: Vec3, v: Vec3, size: Vec2, path: impl Into<String>) -> Self {
+        Image { insert, u, v, size, path: path.into(), ..Image::default() }
+    }
+
+    /// Four corners of the image in world coordinates: [bottom-left, bottom-right, top-right, top-left].
+    pub fn corners(&self) -> [Vec2; 4] {
+        let o = self.insert.xy();
+        let u = self.u.xy() * self.size.x;
+        let v = self.v.xy() * self.size.y;
+        [o, o + u, o + u + v, o + v]
+    }
+
+    /// Transform this image by affine 2D matrix `m`.
+    pub fn transform(&mut self, m: &Mat3) {
+        let p = m.apply(self.insert.xy());
+        self.insert.x = p.x;
+        self.insert.y = p.y;
+        self.u = m.apply_vec(self.u.xy()).to3(0.0);
+        self.v = m.apply_vec(self.v.xy()).to3(0.0);
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wipeout {
     pub boundary: Vec<Vec2>,
@@ -1355,9 +1379,7 @@ impl EntityKind {
                 v.height *= s;
             }
             EntityKind::Image(i) => {
-                t3(&mut i.insert);
-                i.u = m.apply_vec(i.u.xy()).to3(0.0);
-                i.v = m.apply_vec(i.v.xy()).to3(0.0);
+                i.transform(m);
             }
             EntityKind::Wipeout(w) => w.boundary.iter_mut().for_each(|p| *p = m.apply(*p)),
             EntityKind::Table(t) => {
@@ -1446,7 +1468,12 @@ impl EntityKind {
                 let h = Vec2::new(v.width / 2.0, v.height / 2.0);
                 Bounds2::new(c - h, c + h).corners().to_vec()
             }
-            EntityKind::Image(i) => vec![i.insert.xy()],
+            EntityKind::Image(i) => {
+                let [c0, c1, c2, c3] = i.corners();
+                let center = (c0 + c2) * 0.5;
+                let top_mid = (c2 + c3) * 0.5;
+                vec![c0, c1, c2, c3, center, top_mid]
+            }
             EntityKind::Wipeout(w) => w.boundary.clone(),
             EntityKind::Table(t) => vec![t.insert.xy()],
             EntityKind::Tolerance(t) => vec![t.insert.xy()],
