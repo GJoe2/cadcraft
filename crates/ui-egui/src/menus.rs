@@ -222,6 +222,24 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         "export" | "exp" | "import" | "imp" | "publish" | "preview" | "pre" if params.is_null() && app.session.state().is_ok() => {
             return Some(crate::exchange::route(app, id));
         }
+        // IMAGEATTACH from menu or typed without parameters: ask for the file with the native image picker.
+        "imageattach" | "iat" | "image" if params.is_null() && app.session.state().is_ok() => {
+            if let Some(pick) = app.services.pick_image.as_ref() {
+                if let Some(path) = pick() {
+                    app.cmd.buffer.clear();
+                    if let Err(e) = app.session.start("imageattach") {
+                        app.session.echo(e.to_string());
+                    } else {
+                        let _ = app.session.input(cadcraft_engine::Input::Text(path));
+                    }
+                }
+                return Some(Ok(Value::Null));
+            }
+            if let Err(e) = app.session.start("imageattach") {
+                app.session.echo(e.to_string());
+            }
+            return Some(Ok(Value::Null));
+        }
         "ui.toggle.statusbar" => {
             toggle(&mut app.ui.show_status_bar, params);
             Ok(Value::Null)
@@ -692,6 +710,7 @@ mod tests {
                 log.borrow_mut().push(name.to_string());
                 answer.clone()
             })),
+            pick_image: None,
         };
         (CadApp::new(Session::new(), services), asked)
     }

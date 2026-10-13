@@ -188,6 +188,7 @@ impl Default for UiState {
 pub struct Services {
     pub pick_open: Option<Box<dyn Fn() -> Option<String>>>,
     pub pick_save: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    pub pick_image: Option<Box<dyn Fn() -> Option<String>>>,
 }
 
 pub struct CadApp {
@@ -307,6 +308,9 @@ impl CadApp {
 
     /// Run a command programmatically (or a UI command).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if id.eq_ignore_ascii_case("pasteclip") || id.eq_ignore_ascii_case("paste") {
+            crate::clipboard::try_load_os_clipboard_image(self);
+        }
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
@@ -326,6 +330,9 @@ impl CadApp {
 
     /// Start a command as if typed (interactive when it has prompts).
     pub fn start(&mut self, name: &str) {
+        if name.eq_ignore_ascii_case("pasteclip") || name.eq_ignore_ascii_case("paste") {
+            crate::clipboard::try_load_os_clipboard_image(self);
+        }
         if menus::run_ui_command(self, name, &Value::Null).is_some() {
             return;
         }
@@ -339,6 +346,9 @@ impl CadApp {
     pub fn cmdline(&mut self, text: &str) -> Option<String> {
         if !self.session.prompting() {
             let first = text.split_whitespace().next().unwrap_or("");
+            if first.eq_ignore_ascii_case("pasteclip") || first.eq_ignore_ascii_case("paste") {
+                crate::clipboard::try_load_os_clipboard_image(self);
+            }
             // `cmd {json}` is a programmatic call: the engine runs it with those parameters.
             let json_form = text.trim_start().get(first.len()..).is_some_and(|rest| rest.trim_start().starts_with('{'));
             if !first.is_empty() && !json_form && menus::run_ui_command(self, &first.to_ascii_lowercase(), &Value::Null).is_some() {
@@ -578,7 +588,34 @@ impl CadApp {
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             let p = f.path().to_string_lossy().to_string();
             if !p.is_empty() {
-                self.open_path(&p);
+                let lower = p.to_ascii_lowercase();
+                if lower.ends_with(".png")
+                    || lower.ends_with(".jpg")
+                    || lower.ends_with(".jpeg")
+                    || lower.ends_with(".bmp")
+                    || lower.ends_with(".webp")
+                    || lower.ends_with(".tif")
+                    || lower.ends_with(".tiff")
+                    || lower.ends_with(".gif")
+                {
+                    let center = self.session.state().map(|s| s.view().center).unwrap_or(cadcraft_geom::Vec2::ZERO);
+                    match self.session.execute(
+                        "imageattach",
+                        &serde_json::json!({
+                            "path": p,
+                            "at": [center.x, center.y],
+                        }),
+                    ) {
+                        Ok(_) => {
+                            self.session.echo(format!("Attached image: {p}"));
+                        }
+                        Err(e) => {
+                            self.session.echo(e.to_string());
+                        }
+                    }
+                } else {
+                    self.open_path(&p);
+                }
             }
         }
     }

@@ -1188,12 +1188,13 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             }
         }
         EntityKind::Image(i) => {
-            let o = i.insert.xy();
-            let u = i.u.xy() * i.size.x;
-            let v = i.v.xy() * i.size.y;
-            b.polyline(ctx, rgb, lw, &[o, o + u, o + u + v, o + v, o]);
-            b.polyline(ctx, rgb, lw, &[o, o + u + v]);
-            b.polyline(ctx, rgb, lw, &[o + u, o + v]);
+            let frame = ctx.d.header.get("IMAGEFRAME").and_then(cadcraft_doc::HVal::as_i64).unwrap_or(1);
+            if frame != 0 {
+                let o = i.insert.xy();
+                let u = i.u.xy() * i.size.x;
+                let v = i.v.xy() * i.size.y;
+                b.polyline(ctx, rgb, lw, &[o, o + u, o + u + v, o + v, o]);
+            }
         }
         EntityKind::Table(t) => table(b, ctx, t, rgb, lw),
         EntityKind::Tolerance(t) => tolerance::draw(b, ctx, e, t, lw, tol),

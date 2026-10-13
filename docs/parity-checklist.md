@@ -1,22 +1,22 @@
 # Parity checklist
 
-> **Generated:** 2026-10-12 by `cargo xtask parity`. Do not edit by hand.
+> **Generated:** 2026-10-13 by `cargo xtask parity`. Do not edit by hand.
 
 Menu-breadth parity: a reference menu item counts as covered when a CADCraft command is registered under the same menu label. It measures breadth, not depth; see [target-app-parity.md](target-app-parity.md) for the weighted assessment.
 
-**Menu breadth: 280 / 491 items (57%)** · 409 registered commands.
+**Menu breadth: 287 / 491 items (58%)** · 430 registered commands.
 
 | Menu | Items | Covered | % |
 |---|---|---|---|
 | File | 22 | 13 | 59% |
 | Edit | 13 | 11 | 85% |
 | View | 75 | 31 | 41% |
-| Insert | 11 | 5 | 45% |
+| Insert | 11 | 6 | 55% |
 | Format | 27 | 25 | 93% |
-| Tools | 85 | 57 | 67% |
+| Tools | 85 | 59 | 69% |
 | Draw | 87 | 55 | 63% |
 | Dimension | 28 | 28 | 100% |
-| Modify | 113 | 52 | 46% |
+| Modify | 113 | 56 | 50% |
 | Window | 22 | 3 | 14% |
 | Help | 8 | 0 | 0% |
 
@@ -78,7 +78,6 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - View > Lights
 - View > Enter Full Screen
 - Insert > PDF Underlay...
-- Insert > Raster Image Reference...
 - Insert > Field...
 - Insert > Layout > Layout from Template...
 - Insert > ACIS File...
@@ -88,9 +87,7 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - Tools > Spelling
 - Tools > Inquiry > Volume
 - Tools > Update Fields
-- Tools > Block Editor
 - Tools > Edit Xref in Place
-- Tools > Load Application...
 - Tools > New UCS > World
 - Tools > New UCS > Face
 - Tools > New UCS > View
@@ -145,13 +142,9 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - Draw > 3D Modeling > Setup > Drawing
 - Draw > 3D Modeling > Setup > View
 - Draw > 3D Modeling > Setup > Profile
-- Modify > Object > External Reference > Frame
-- Modify > Object > Image > Adjust...
 - Modify > Object > Image > Quality
 - Modify > Object > Image > Transparency
-- Modify > Object > Image > Frame
 - Modify > Object > Block Description...
-- Modify > Clip > Image
 - Modify > Clip > Xref
 - Modify > 3D Operations > 3D Move
 - Modify > 3D Operations > 3D Rotate

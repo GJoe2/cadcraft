@@ -20,6 +20,7 @@ fn app() -> (CadApp, Rc<Cell<u32>>) {
             b.set(b.get() + 1);
             None
         })),
+        pick_image: None,
     };
     (CadApp::new(Session::new(), services), picks)
 }

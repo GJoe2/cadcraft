@@ -1,6 +1,8 @@
 //! The drawing area: grid, entities, selection highlighting, grips, rubber bands, object-snap
 //! markers, crosshair cursor, ViewCube, UCS icon and mouse handling.
 
+use std::collections::HashMap;
+
 use cadcraft_color::Rgb;
 use cadcraft_doc::Handle;
 use cadcraft_engine::Input;
@@ -127,6 +129,10 @@ pub struct CanvasState {
     /// Tab was pressed over a snap marker: show the next candidate ([`SnapCycle`]).
     pub snap_tab: bool,
     pub snap_cycle: Option<SnapCycle>,
+    /// Textures cached on GPU for raster images.
+    pub image_textures: HashMap<String, egui::TextureHandle>,
+    /// Hash of the clipboard image used for the preview texture.
+    pub preview_hash: Option<u64>,
 }
 
 impl CanvasState {
@@ -733,6 +739,166 @@ fn clip_infinite(xf: &Xf, base: Vec2, dir: Vec2, ray: bool) -> Option<[Pos2; 2]>
     let a = if ray { base } else { base - dir * far };
     let b = base + dir * far;
     Some([xf.to_screen(a), xf.to_screen(b)])
+}
+
+fn load_texture_from_bytes(ctx: &egui::Context, bytes: &[u8], name: &str) -> Option<egui::TextureHandle> {
+    let dyn_img = image::load_from_memory(bytes).ok()?;
+    let (w, h) = (dyn_img.width(), dyn_img.height());
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        return None;
+    }
+    let rgba = dyn_img.to_rgba8();
+    let size = [w as usize, h as usize];
+    let pixels = rgba.into_raw();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    Some(ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR))
+}
+
+fn paint_image_entity(
+    canvas: &mut CanvasState,
+    doc: &cadcraft_doc::Drawing,
+    img: &cadcraft_doc::Image,
+    doc_path: Option<&str>,
+    painter: &egui::Painter,
+    xf: &Xf,
+    ctx: &egui::Context,
+    opacity: f32,
+) {
+    let texture = match canvas.image_textures.get(&img.path) {
+        Some(tex) => tex.clone(),
+        None => {
+            let bytes = cadcraft_engine::cmd::image::resolve_image_bytes(doc, img, doc_path);
+            let Some(bytes) = bytes else { return };
+            let Some(tex) = load_texture_from_bytes(ctx, &bytes, &img.path) else { return };
+            canvas.image_textures.insert(img.path.clone(), tex.clone());
+            tex
+        }
+    };
+
+    let corners = img.corners();
+    let p_bl = xf.to_screen(corners[0]);
+    let p_br = xf.to_screen(corners[1]);
+    let p_tr = xf.to_screen(corners[2]);
+    let p_tl = xf.to_screen(corners[3]);
+
+    if !p_bl.is_finite() || !p_br.is_finite() || !p_tr.is_finite() || !p_tl.is_finite() {
+        return;
+    }
+
+    let fade_alpha = (100u32.saturating_sub(img.fade as u32) * 255 / 100).clamp(0, 255) as f32;
+    let alpha = (fade_alpha * opacity).clamp(0.0, 255.0) as u8;
+    let tint = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+
+    let mut mesh = egui::Mesh::with_texture(texture.id());
+    let i0 = mesh.vertices.len() as u32;
+    mesh.vertices.push(egui::epaint::Vertex { pos: p_bl, uv: pos2(0.0, 1.0), color: tint });
+    mesh.vertices.push(egui::epaint::Vertex { pos: p_br, uv: pos2(1.0, 1.0), color: tint });
+    mesh.vertices.push(egui::epaint::Vertex { pos: p_tr, uv: pos2(1.0, 0.0), color: tint });
+    mesh.vertices.push(egui::epaint::Vertex { pos: p_tl, uv: pos2(0.0, 0.0), color: tint });
+    mesh.indices.extend([i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn paint_images(
+    canvas: &mut CanvasState,
+    session: &cadcraft_engine::Session,
+    painter: &egui::Painter,
+    xf_model: &Xf,
+    xf_paper: &Xf,
+    ctx: &egui::Context,
+) {
+    let Ok(st) = session.state() else { return };
+    let doc_path = st.path.as_deref();
+    let space = st.edit_space();
+    let xf = match &space {
+        cadcraft_doc::Space::Model => xf_model,
+        cadcraft_doc::Space::Paper(_) => xf_paper,
+    };
+    let Some(store) = st.doc.space(&space) else { return };
+    for e in store.iter() {
+        if let cadcraft_doc::EntityKind::Image(img) = &e.kind {
+            if let Some(layer) = st.doc.layer(&e.common.layer)
+                && (layer.frozen || !layer.on)
+            {
+                continue;
+            }
+            if img.display & 1 == 0 {
+                continue;
+            }
+            paint_image_entity(canvas, &st.doc, img, doc_path, painter, xf, ctx, 1.0);
+        } else if let cadcraft_doc::EntityKind::Insert(ins) = &e.kind
+            && let Some(b) = st.doc.block(&ins.block)
+        {
+            let m = ins.transform(b.base.xy());
+            for be in b.entities.iter() {
+                if let cadcraft_doc::EntityKind::Image(bimg) = &be.kind {
+                    let mut ximg = bimg.clone();
+                    ximg.transform(&m);
+                    paint_image_entity(canvas, &st.doc, &ximg, doc_path, painter, xf, ctx, 1.0);
+                }
+            }
+        }
+    }
+}
+
+fn paint_preview_images(
+    canvas: &mut CanvasState,
+    session: &cadcraft_engine::Session,
+    ents: &[cadcraft_doc::Entity],
+    painter: &egui::Painter,
+    xf: &Xf,
+    ctx: &egui::Context,
+) {
+    for ent in ents {
+        if let cadcraft_doc::EntityKind::Image(img) = &ent.kind {
+            let tex = if img.path == "preview" {
+                let Some(clip_img) = &session.clipboard_image else { continue };
+                let hash = {
+                    use std::hash::{DefaultHasher, Hasher};
+                    let mut h = DefaultHasher::new();
+                    h.write(&clip_img.bytes);
+                    h.finish()
+                };
+                if canvas.preview_hash != Some(hash)
+                    && let Some(t) = load_texture_from_bytes(ctx, &clip_img.bytes, "__preview__")
+                {
+                    canvas.image_textures.insert("__preview__".to_string(), t);
+                    canvas.preview_hash = Some(hash);
+                }
+                canvas.image_textures.get("__preview__").cloned()
+            } else {
+                canvas.image_textures.get(&img.path).cloned().or_else(|| {
+                    let doc = session.doc().ok()?;
+                    let doc_path = session.drawing_path();
+                    let bytes = cadcraft_engine::cmd::image::resolve_image_bytes(doc, img, doc_path.as_deref())?;
+                    let t = load_texture_from_bytes(ctx, &bytes, &img.path)?;
+                    canvas.image_textures.insert(img.path.clone(), t.clone());
+                    Some(t)
+                })
+            };
+
+            let Some(texture) = tex else { continue };
+            let corners = img.corners();
+            let p_bl = xf.to_screen(corners[0]);
+            let p_br = xf.to_screen(corners[1]);
+            let p_tr = xf.to_screen(corners[2]);
+            let p_tl = xf.to_screen(corners[3]);
+
+            if !p_bl.is_finite() || !p_br.is_finite() || !p_tr.is_finite() || !p_tl.is_finite() {
+                continue;
+            }
+
+            let tint = Color32::from_rgba_unmultiplied(255, 255, 255, 160);
+            let mut mesh = egui::Mesh::with_texture(texture.id());
+            let i0 = mesh.vertices.len() as u32;
+            mesh.vertices.push(egui::epaint::Vertex { pos: p_bl, uv: pos2(0.0, 1.0), color: tint });
+            mesh.vertices.push(egui::epaint::Vertex { pos: p_br, uv: pos2(1.0, 1.0), color: tint });
+            mesh.vertices.push(egui::epaint::Vertex { pos: p_tr, uv: pos2(1.0, 0.0), color: tint });
+            mesh.vertices.push(egui::epaint::Vertex { pos: p_tl, uv: pos2(0.0, 0.0), color: tint });
+            mesh.indices.extend([i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
 }
 
 /// Draw a display list.
@@ -1637,6 +1803,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         draw_vp_content(&mut app.canvas.vp, gpu, &clipped, &f, &xf_paper, bg, app.session.settings.lwdisplay);
         masked = gpu && f.outline.is_some();
     }
+    paint_images(&mut app.canvas, &app.session, &painter, &xf, &xf_paper, ui.ctx());
     if app.canvas.gpu.is_some() {
         draw_list_gpu(&mut app.canvas, &painter, &xf_paper, bg, app.session.settings.lwdisplay);
     } else if let Some(list) = &app.canvas.list {
@@ -1796,6 +1963,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         if !ents.is_empty()
             && let Ok(st) = app.session.state()
         {
+            paint_preview_images(&mut app.canvas, &app.session, &ents, &painter, &xf, ui.ctx());
             let list = rebuilt_preview(&st.doc, ents.iter(), scale);
             draw_list(&painter, &xf, &list, bg, false);
         }

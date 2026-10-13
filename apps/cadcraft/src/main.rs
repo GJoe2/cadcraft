@@ -143,6 +143,13 @@ fn services() -> Services {
                 .save_file()
                 .map(|p| p.to_string_lossy().to_string())
         })),
+        pick_image: Some(Box::new(|| {
+            rfd::FileDialog::new()
+                .add_filter(i18n::t("Raster Images (PNG, JPG, BMP, WEBP, TIFF)"), &["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff", "gif"])
+                .add_filter(i18n::t("All files"), &["*"])
+                .pick_file()
+                .map(|p| p.to_string_lossy().to_string())
+        })),
     }
 }
 

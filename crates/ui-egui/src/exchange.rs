@@ -176,6 +176,7 @@ mod tests {
                 b.borrow_mut().push(name.to_string());
                 None
             })),
+            pick_image: None,
         };
         (CadApp::new(Session::new(), services), asked)
     }

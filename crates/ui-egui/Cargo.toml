@@ -23,7 +23,13 @@ egui-wgpu = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, features = ["bmp"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = { workspace = true, features = ["image-data"] }
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5"
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
