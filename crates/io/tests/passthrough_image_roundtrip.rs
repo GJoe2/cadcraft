@@ -203,3 +203,64 @@ fn image_survives_dwg_save_and_reopen() {
     // The DWG bridge keeps everything but the definition's resolution unit.
     assert_eq!(Image { resolution_units: img.resolution_units, ..b }, img);
 }
+
+#[test]
+fn ole2frame_extracts_embedded_image() {
+    // Construct a minimal valid BMP (1x1 pixel, 24-bit RGB: 14 byte file header + 40 byte DIB header + 4 byte padded pixel = 58 bytes)
+    let mut bmp: Vec<u8> = Vec::new();
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(58u32).to_le_bytes()); // file size
+    bmp.extend_from_slice(&[0, 0, 0, 0]); // reserved
+    bmp.extend_from_slice(&(54u32).to_le_bytes()); // offset to bits
+    // BITMAPINFOHEADER (40 bytes)
+    bmp.extend_from_slice(&(40u32).to_le_bytes()); // biSize
+    bmp.extend_from_slice(&(1i32).to_le_bytes()); // width = 1
+    bmp.extend_from_slice(&(1i32).to_le_bytes()); // height = 1
+    bmp.extend_from_slice(&(1u16).to_le_bytes()); // planes = 1
+    bmp.extend_from_slice(&(24u16).to_le_bytes()); // bpp = 24
+    bmp.extend_from_slice(&(0u32).to_le_bytes()); // compression = BI_RGB
+    bmp.extend_from_slice(&(4u32).to_le_bytes()); // size image = 4
+    bmp.extend_from_slice(&(2835i32).to_le_bytes()); // x ppm
+    bmp.extend_from_slice(&(2835i32).to_le_bytes()); // y ppm
+    bmp.extend_from_slice(&(0u32).to_le_bytes()); // clr used
+    bmp.extend_from_slice(&(0u32).to_le_bytes()); // clr important
+    // 1 pixel (BGR) + 1 byte padding = 4 bytes
+    bmp.extend_from_slice(&[255, 0, 0, 0]); // blue pixel
+
+    // Convert BMP to hex string
+    let hex: String = bmp.iter().map(|b| format!("{b:02X}")).collect();
+
+    let dxf = format!(
+        "0\nSECTION\n2\nENTITIES\n\
+        0\nOLE2FRAME\n5\n5A\n100\nAcDbEntity\n8\n0\n100\nAcDbOle2Frame\n70\n2\n3\nPaintbrush Picture\n\
+        10\n10.0\n20\n30.0\n30\n0.0\n\
+        11\n50.0\n21\n10.0\n31\n0.0\n\
+        71\n1\n90\n{}\n310\n{}\n\
+        0\nENDSEC\n0\nEOF\n",
+        bmp.len(),
+        hex
+    );
+
+    let d = cadcraft_io::read_dxf(dxf.as_bytes()).unwrap();
+    let imgs = images(&d);
+    assert_eq!(imgs.len(), 1, "OLE2FRAME should be parsed into Image entity");
+    let img = &imgs[0];
+    assert_eq!(img.insert, cadcraft_geom::Vec3::new(10.0, 10.0, 0.0));
+    assert_eq!(img.path, "__ole_5A__");
+    assert_eq!(img.name, "Paintbrush Picture");
+    assert_eq!(img.size, Vec2::new(1.0, 1.0));
+
+    let asset = d.get_image_asset(&img.path);
+    assert!(asset.is_some(), "d.image_assets should contain extracted image");
+    assert_eq!(asset.unwrap().as_slice(), bmp.as_slice());
+
+    // When saving to DXF, OLE2FRAME is written back natively without phantom IMAGEDEF
+    let out_dxf = cadcraft_io::write(&d, "out.dxf").unwrap();
+    let out_str = String::from_utf8(out_dxf).unwrap();
+    assert!(out_str.contains("OLE2FRAME"), "Saved DXF should contain OLE2FRAME entity");
+    assert!(!out_str.contains("IMAGEDEF"), "Saved DXF should not write phantom IMAGEDEF for OLE frame");
+
+    // When saving to DWG, write succeeds without errors
+    let out_dwg = cadcraft_io::write(&d, "out.dwg");
+    assert!(out_dwg.is_ok(), "Writing DWG with embedded OLE item should succeed: {:?}", out_dwg.err());
+}
