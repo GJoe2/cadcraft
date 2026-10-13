@@ -198,6 +198,27 @@ fn lengthen_open_splines() {
 }
 
 #[test]
+fn shortening_a_tightly_bent_spline_reaches_the_requested_length() {
+    // #705: a fixed quadrature left this cubic 0.137 longer than asked, whatever the mode.
+    let control = json!([[2.164, -9.484], [8.964, -13.012], [-16.428, -1.276], [18.58, -18.08]]);
+    let half = 26.708_124_545_291_4 / 2.0;
+    for mode in [json!({ "total": half }), json!({ "delta": -half }), json!({ "percent": 50 })] {
+        let mut s = Session::new();
+        let sp = h(&s.execute("spline", &json!({ "degree": 3, "control": control })).unwrap());
+        let before = spline(&s, &sp);
+        assert!((length(&mut s, &sp) - 2.0 * half).abs() < 1e-6, "{mode}");
+        let mut q = mode.clone();
+        q["handle"] = json!(sp);
+        s.execute("lengthen", &q).unwrap();
+        let got = length(&mut s, &sp);
+        assert!((got - half).abs() < 1e-6, "{mode}: {got}");
+        let now = spline(&s, &sp);
+        assert!(ends(&now).0.near(ends(&before).0, 1e-9), "{mode}");
+        assert!(dist_to(&before, ends(&now).1) < 1e-9, "{mode}: the new end lies on the old curve");
+    }
+}
+
+#[test]
 fn lengthen_at_the_command_line_on_an_elliptical_arc() {
     let mut s = Session::new();
     let e = quarter_ellipse(&mut s);
@@ -238,6 +259,26 @@ fn join_merges_elliptical_arcs_on_one_ellipse() {
     let b = h(&s.execute("ellipse", &json!({ "center": [1, 1], "major": [-4, 0], "ratio": 0.5, "start": 0, "end": 180 })).unwrap());
     s.execute("join", &json!({ "handles": [a, b] })).unwrap();
     assert!(ellipse(&s, &a).is_full());
+    assert_eq!(count(&s), 1);
+}
+
+#[test]
+fn join_names_an_elliptical_arc_twice_without_losing_it() {
+    // The same arc twice is one object: nothing to join, and the arc stays.
+    let mut s = Session::new();
+    let a = arc_on_ellipse(&mut s, 0.0, 90.0);
+    let before = ellipse(&s, &a);
+    assert!(s.execute("join", &json!({ "handles": [a, a] })).is_err());
+    assert_eq!(count(&s), 1);
+    assert_eq!(ellipse(&s, &a), before);
+    // Repeating the source next to a second arc still merges the two into the source.
+    let mut s = Session::new();
+    let a = arc_on_ellipse(&mut s, 0.0, 90.0);
+    let b = arc_on_ellipse(&mut s, 90.0, 180.0);
+    let r = s.execute("join", &json!({ "handles": [a, a, b] })).unwrap();
+    assert_eq!(h(&r), a);
+    let m = ellipse(&s, &a);
+    assert!(m.start.abs() < 1e-9 && (m.end - PI).abs() < 1e-9, "{m:?}");
     assert_eq!(count(&s), 1);
 }
 

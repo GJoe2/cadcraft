@@ -9,7 +9,7 @@ use crate::CadApp;
 use crate::theme::Tokens;
 
 pub fn show(app: &mut CadApp, ctx: &egui::Context) {
-    mtext_editor(app, ctx);
+    crate::mtext_editor::show(app, ctx);
     crate::quick::quick_properties(app, ctx);
     let Some(d) = app.ui.dialog.clone() else { return };
     let mut open = true;
@@ -21,10 +21,13 @@ pub fn show(app: &mut CadApp, ctx: &egui::Context) {
         "parameters" => crate::parametric::parameters_dialog(app, ctx, &mut open),
         "dsettings" => dsettings(app, ctx, &mut open),
         "units" => units(app, ctx, &mut open),
+        "hatch" => crate::hatchdlg::dialog(app, ctx, &mut open),
         "about" => about(ctx, &mut open),
         "preview" => crate::exchange::dialog(app, ctx, &mut open),
         "commands" => commands(app, ctx, &mut open),
         "blocks" => blocks(app, ctx, &mut open),
+        "bedit" => crate::bedit::dialog(app, ctx, &mut open),
+        "authoring" => crate::bedit::authoring_dialog(app, ctx, &mut open),
         "stylesmanager" => crate::plotstyles::dialog(app, ctx, &mut open),
         o if o == "options" || o.starts_with("options:") => crate::options::dialog(app, ctx, o, &mut open),
         other => crate::managers::dialog(app, ctx, other, &mut open),
@@ -399,100 +402,6 @@ fn insert_block(app: &mut CadApp, name: &str) {
     }
     if let Err(e) = app.session.input(cadcraft_engine::Input::Text(name.to_string())) {
         app.session.echo(e.to_string());
-    }
-}
-
-/// The editor's lines as a list: a hanging indent of three text heights with a tab stop there
-/// (`\pxi-3,l3,t3;`) and each line a bullet or its number and a tab.
-fn as_list(buf: &str, numbered: bool) -> String {
-    let lines: Vec<String> =
-        buf.split('\n').enumerate().map(|(i, l)| if numbered { format!("{}.\t{l}", i + 1) } else { format!("•\t{l}") }).collect();
-    format!("\\pxi-3,l3,t3;{}", lines.join("\n"))
-}
-
-/// The multiline text editor shown while MTEXT asks for its contents.
-fn mtext_editor(app: &mut CadApp, ctx: &egui::Context) {
-    let active = app.session.running.as_ref().is_some_and(|r| r.id == "mtext")
-        && app.session.current_prompt().is_some_and(|p| p.accept.text && !p.accept.point);
-    let id = egui::Id::new("mtext_editor_buffer");
-    if !active {
-        ctx.data_mut(|d| d.remove::<String>(id));
-        return;
-    }
-    let mut buf = ctx.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_default();
-    let mut submit = None;
-    let mut cancel = false;
-    egui::Window::new(crate::tl!("Text Editor"))
-        .id(egui::Id::new("Text Editor"))
-        .collapsible(false)
-        .resizable(true)
-        .default_size(vec2(460.0, 220.0))
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(crate::tl!("Style: Standard"));
-                ui.separator();
-                let h = app.session.doc().map(|d| d.header.f64("TEXTSIZE", 0.2)).unwrap_or(0.2);
-                ui.label(crate::tf!("Height: {height}", height = format!("{h:.4}")));
-                ui.separator();
-                if ui.button(crate::tl!("B")).on_hover_text(crate::tl!("Bold")).clicked() {
-                    buf.push_str("{\\fArial|b1;}");
-                }
-                if ui.button("⅟").on_hover_text(crate::tl!("Stack (type 1/2 then select)")).clicked() {
-                    buf.push_str("\\S1/2;");
-                }
-                if ui.button("°").on_hover_text(crate::tl!("Degree")).clicked() {
-                    buf.push_str("%%d");
-                }
-                if ui.button("±").on_hover_text(crate::tl!("Plus/minus")).clicked() {
-                    buf.push_str("%%p");
-                }
-                if ui.button("⌀").on_hover_text(crate::tl!("Diameter")).clicked() {
-                    buf.push_str("%%c");
-                }
-                ui.separator();
-                if ui.button("⇥").on_hover_text(crate::tl!("Insert tab")).clicked() {
-                    buf.push('\t');
-                }
-                if ui.button("•≡").on_hover_text(crate::tl!("Bulleted list")).clicked() {
-                    buf = as_list(&buf, false);
-                }
-                if ui.button("1≡").on_hover_text(crate::tl!("Numbered list")).clicked() {
-                    buf = as_list(&buf, true);
-                }
-            });
-            let r = ui.add(
-                egui::TextEdit::multiline(&mut buf)
-                    .desired_rows(6)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(crate::tl!("Type text; Enter starts a new paragraph")),
-            );
-            if !r.has_focus() && buf.is_empty() {
-                r.request_focus();
-            }
-            ui.horizontal(|ui| {
-                if ui.button(crate::tl!("OK")).clicked() || (r.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))) {
-                    submit = Some(buf.replace('\n', "\\P"));
-                }
-                if ui.button(crate::tl!("Cancel")).clicked() {
-                    cancel = true;
-                }
-                let finish = if ui.ctx().os().is_mac() { crate::tl!("⌘↩ to finish") } else { crate::tl!("Ctrl+Enter to finish") };
-                ui.label(RichText::new(finish).small());
-            });
-        });
-    ctx.data_mut(|d| d.insert_temp(id, buf));
-    if let Some(t) = submit {
-        ctx.data_mut(|d| d.remove::<String>(id));
-        // The editor holds the whole contents: one input, then Enter ends MTEXT's text entry.
-        if !t.is_empty() {
-            let _ = app.session.input(cadcraft_engine::Input::Text(t));
-        }
-        if app.session.running.as_ref().is_some_and(|r| r.id == "mtext") {
-            let _ = app.session.input(cadcraft_engine::Input::Enter);
-        }
-    } else if cancel {
-        ctx.data_mut(|d| d.remove::<String>(id));
-        app.session.cancel();
     }
 }
 

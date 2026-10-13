@@ -321,6 +321,7 @@
 	Equal	Рівність
 	Erase	Стерти
 	Evaluate	Обчислити
+	Evaluate LISP	Обчислити LISP
 	Exclude from new selection set	Виключити з нового набору вибраних об'єктів
 	Explode	Розчленувати
 	Export	Експортувати
@@ -405,6 +406,10 @@
 	How to apply:	Спосіб застосування:
 	ID Point	Координати точки
 	Import	Імпортувати
+	Align Multileaders	Вирівняти мультивиноски
+	Collect	Зібрати
+	Collect Multileaders	Зібрати мультивиноски
+	Edit Multileader	Редагувати мультивиноску
 	In	Наблизити
 	In-window Menu Bar	Рядок меню у вікні
 	Include in new selection set	Включити до нового набору вибраних об'єктів
@@ -496,6 +501,7 @@
 	List Text Styles	Список текстових стилів
 	Load all	Завантажити всі
 	Load...	Завантажити...
+	Load Application...	Завантажити застосунок...
 	Loaded linetypes	Завантажені типи ліній
 	Lock	Заблокувати
 	Lock Layer	Заблокувати шар
@@ -587,6 +593,8 @@
 	Open sample drawing	Відкрити зразок креслення
 	Open Xref	Відкрити зовнішнє посилання
 	Open...	Відкрити...
+	Open Recent	Відкрити нещодавні
+	Clear Recent Files	Очистити список нещодавніх файлів
 	Operator:	Оператор:
 	Orbit	Орбіта
 	Ordinate	Ординатний
@@ -813,6 +821,11 @@
 	Select objects to array.	Виберіть об'єкти для масиву.
 	Select objects to stretch by crossing-window or crossing-polygon...	Виберіть об'єкти для розтягування січною рамкою або січним багатокутником...
 	Select objects:	Виберіть об'єкти:
+	Add to Working Set	Додати до робочого набору
+	Edit Reference In-Place	Редагувати посилання на місці
+	Save Reference Edits	Зберегти зміни посилання
+	Working Set	Робочий набір
+	Xref and Block In-place Editing	Редагування xref і блоків на місці
 	Select one polyline (Multiple is available through the JSON form).	Виберіть одну полілінію (Multiple доступно через JSON).
 	Select path curve	Виберіть криву траєкторії
 	Select point or object	Виберіть точку або об'єкт
@@ -932,21 +945,32 @@
 	Command line history	Історія командного рядка
 	Copy as JSON	Копіювати як JSON
 	Crosshair size	Розмір перехрестя
+	Crossing selection color:	Колір секучого вибору:
 	Display	Відображення
+	Exclude:	Виключити:
 	Grip size	Розмір ручок
+	Grips	Ручки
+	Groups	Групи
+	Hatches	Штрихування
 	Hold Shift to add to the selection	Утримувати Shift, щоб додати до вибору
+	Indicate selection area	Показувати область вибору
 	Interface language	Мова інтерфейсу
 	Interface theme	Тема інтерфейсу
 	Keep the system cursor visible over the drawing area	Показувати системний курсор над областю креслення
 	Largest array	Найбільший масив
 	Layout paper	Папір аркуша
 	Model background	Тло простору моделі
+	Multiline text	Багаторядковий текст
+	Object grouping	Групування об'єктів
+	Object selection limit for display of grips	Межа кількості вибраних об'єктів для показу ручок
 	Object snap aperture	Апертура об'єктної прив'язки
 	Object snap marker size	Розмір маркера об'єктної прив'язки
+	Objects on locked layers	Об'єкти на заблокованих шарах
 	Open and Save	Відкриття та збереження
 	Options	Параметри
 	Options...	Параметри...
 	Pickbox size	Розмір прицілу вибору
+	Preview	Попередній перегляд
 	Profiles	Профілі
 	Reset keeps the interface language.	Скидання не змінює мову інтерфейсу.
 	Reset to Defaults	Скинути до типових
@@ -954,11 +978,25 @@
 	Screen magnifiers, screen readers and recorders follow the system cursor.	Екранні лупи, програми читання з екрана та запису стежать за системним курсором.
 	Select objects first, then choose a command	Спочатку вибирати об'єкти, потім команду
 	Selection	Вибір
+	Selection Area Effect	Ефект області вибору
+	Selection Preview Filter	Фільтр попереднього перегляду вибору
+	Selection area opacity:	Непрозорість області вибору:
+	Selection effect color	Колір ефекту вибору
+	Selection modes	Режими вибору
+	Selection preview	Попередній перегляд вибору
 	Settings...	Налаштування...
 	Show Quick Properties for selected objects	Показувати швидкі властивості вибраних об'єктів
+	Show grips	Показувати ручки
 	Snap, grid, polar tracking and Dynamic Input:	Крок, сітка, полярне відстеження та динамічне введення:
+	Tables	Таблиці
 	The aperture is how near the cursor must come to a point for an object snap to find it.	Апертура — це наскільки близько курсор має підійти до точки, щоб об'єктна прив'язка її знайшла.
 	User Preferences	Налаштування користувача
+	Visual Effect Settings	Параметри візуальних ефектів
+	Visual Effect Settings...	Параметри візуальних ефектів...
+	When a command is active	Коли команда активна
+	When no command is active	Коли жодна команда не активна
+	Window selection color:	Колір вибору рамкою:
+	Xrefs	Зовнішні посилання
 	objects	об'єктів
 	Specify inside diameter of donut	Укажіть внутрішній діаметр кільця
 	Specify leader arrowhead location	Укажіть розташування стрілки виноски
@@ -1179,6 +1217,8 @@
 	Hide Others	Приховати інші
 	Accessibility	Спеціальні можливості
 	Show System Cursor	Показувати системний курсор
+	Animation Effects	Ефекти анімації
+	Animation effects	Ефекти анімації
 	Import...	Імпорт...
 	Export...	Експорт...
 	Batch Publish...	Пакетна публікація...
@@ -1233,3 +1273,60 @@
 	Hatch Pattern	Зразок штрихування
 	Search for pattern	Пошук зразка
 	Run Script...	Виконати сценарій...
+	Query Texts	Запит текстів
+	Hatch Pick	Вибір для штрихування
+# Hatch and Gradient dialog
+	Hatch and Gradient	Штрихування та градієнт
+	Color 1	Колір 1
+	Color 2	Колір 2
+	Shape	Форма
+	Curved	Вигнутий
+	Spherical	Сферичний
+	Hemispherical	Напівсферичний
+	Inverted	Інвертований
+	Centered	По центру
+	Hatch origin	Початок штрихування
+	Use current origin	Використати поточний початок
+	Specified origin	Заданий початок
+	Click to set new origin	Клацніть, щоб задати новий початок
+	Default to boundary extents	Типово за габаритами контуру
+	Bottom left	Унизу ліворуч
+	Bottom right	Унизу праворуч
+	Top left	Угорі ліворуч
+	Top right	Угорі праворуч
+	Boundaries	Контури
+	Add: Pick points	Додати: вказати точки
+	Add: Select objects	Додати: вибрати об'єкти
+	Boundaries picked: {n}	Вибрано контурів: {n}
+	Associative	Асоціативне
+	Create separate hatches	Створити окремі штрихування
+	Island detection	Виявлення островів
+	Normal	Звичайне
+	Outer	Зовнішнє
+	Ignore	Ігнорувати
+	Origin: {x}, {y}	Початок: {x}, {y}
+	Sheet Books to PDF...	Книги аркушів у PDF...
+	Not a number or distance: {text}	Не число й не відстань: {text}
+	Dynamic Block Data	Дані динамічного блока
+	Custom	Користувацькі
+	Dynamic Block Reference	Посилання на динамічний блок
+	Set Dynamic Property	Задати динамічну властивість
+	Dynamic Block Grips	Ручки динамічного блока
+	Drag Dynamic Grip	Перетягнути ручку динамічного блока
+# Block Editor (BEDIT).
+	Save Block	Зберегти блок
+	Save Block As	Зберегти блок як
+	Close Block Editor	Закрити редактор блоків
+	Unsaved changes	Незбережені зміни
+	Edit Block Definition	Редагувати визначення блока
+	Block to create or edit	Блок для створення або редагування
+	Open in Block Editor	Відкрити в редакторі блоків
+	This drawing	Це креслення
+	contains authoring elements. Open in Block Editor?	містить елементи розробки. Відкрити в редакторі блоків?
+	New block	Новий блок
+	Italic	Курсив
+	Underline	Підкреслений
+	Overline	Надкреслений
+	Justify	За шириною
+	Text color	Колір тексту
+	Click the ruler to add a tab stop, right-click to remove one	Натисніть на лінійку, щоб додати табуляцію; права кнопка видаляє її

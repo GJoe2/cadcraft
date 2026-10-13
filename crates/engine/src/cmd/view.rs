@@ -265,7 +265,9 @@ fn run_view_set(s: &mut Session, p: &Value) -> Result<Value> {
     if h <= 0.0 {
         return Err(bad("view.set", "height must be positive"));
     }
-    s.state_mut()?.set_view(View { center: c, height: h });
+    if !s.state_mut()?.set_view(View { center: c, height: h }) {
+        return Err(bad("view.set", "the view is too large to show. Nothing was changed"));
+    }
     ok()
 }
 
@@ -421,7 +423,7 @@ impl Interactive for ZoomM {
                 .kw(&["All", "Center", "Dynamic", "Extents", "Previous", "Scale", "Window", "Object"])
                 .default("real time"),
             (true, None) => Prompt::new("Specify first corner", Accept::POINT),
-            (_, Some(a)) => Prompt::new("Specify opposite corner", Accept::POINT).base(a),
+            (_, Some(a)) => Prompt::new("Specify opposite corner", Accept::POINT).corner(a),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {

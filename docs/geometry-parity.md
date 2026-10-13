@@ -1,6 +1,6 @@
 # Geometry parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (constraint solver: DOF report, G2 Smooth, ellipse/spline/block geometry, CONSTRAINTINFER, #546) · **Target:** Autodesk AutoCAD 2027
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (property-based and hostile-input test suite for geometry landed) · **Target:** Autodesk AutoCAD 2027
 
 CAD users trust numbers: a trimmed endpoint, an offset, an intersection or an area is either right
 to the last displayed digit or the tool is unusable for production drawings. This document
@@ -80,7 +80,7 @@ constraints 10%.
 
 | Command | AutoCAD supports | CADCraft supports |
 |---|---|---|
-| TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline |
+| TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline On a closed polyline a pick before the first or after the last cut keeps the run between the cuts and nothing more (#726). |
 | EXTEND | every open curve | line, arc, polyline, elliptical arc, open spline (runs on along its end tangent, `modify2/curve_edits.rs`) |
 | FILLET | lines, arcs, circles, polylines, ellipses, splines, xlines, rays; Trim/No trim | lines, arcs, circles (TTR circle), polyline mode, Trim/No trim, Multiple; elliptical arcs and splines with any of these (tangent circle from sampled offsets refined by Newton's method, `geom/src/fillet.rs`; arcs trimmed or extended round the ellipse, splines split at the touch point); two straight segments of one polyline (adjacent, or with one between that the corner replaces), a polyline's straight end segment with a line (the line joins it); not polyline arc segments, xlines or rays |
 | CHAMFER | lines, polylines, xlines, rays | lines, Distance/Angle, whole polylines (Polyline option), polyline segments as for FILLET (`modify2/fillet_pline.rs`); refuses arcs, ellipses and splines with a message, as AutoCAD; not xlines or rays |
@@ -126,9 +126,15 @@ lines are scanline families clipped against the tessellated loops (`render/src/h
 
 ## Tests
 
-`#[test]` counts on 2026-10-10: geom 28, constraints 22, render 50, engine 174. No property-based
-or fuzz tests of geometry, and no known-answer suite at large coordinates. Hostile-input tests
-exist for parsing, not for numerics.
+`#[test]` counts on 2026-10-10: geom 28, constraints 22, render 50, engine 174. A property-based
+and hostile-input suite for geometry numerics landed 2026-10-12 (`crates/geom/src/property_tests.rs`):
+a deterministic xorshift generator (no new dependency) drives a few thousand cases per property —
+intersections lie on both curves and are symmetric, circle pairs match the closed form, closest
+points are fixed points (perpendicular inside the segment, endpoints outside), three-point arcs
+keep `{start, end} = {p1, p3}` and contain p2 (the CCW-only storage swaps the pair when p2 is on
+the clockwise side, as DXF does), and hostile inputs (NaN, infinities, subnormals, raw bit
+patterns, 1e300) never panic and return only finite hits or none. Known answers hold at 1e6–1e7
+coordinates to 1e-9 relative.
 
 ## What to do first (ranked)
 
@@ -149,6 +155,8 @@ Total ≈ 90–140 h; items 1–6 parallelise across two or three agents.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | trivial | TRIM on a closed polyline keeps only the complementary run when the pick lies past the last cut (#726) |
+| 2026-10-12 | minor | Property-based and hostile-input tests for geometry numerics landed (`crates/geom/src/property_tests.rs`): intersections, closest points, three-point arcs, bounds, vector identities; hostile f64s never panic; known answers at 1e6–1e7 |
 | 2026-10-10 | major | First geometry-precision audit: tolerances, curves, intersections, offsets, modify commands, measurement, hatch, solver |
 | 2026-10-11 | minor | EXTEND, JOIN and LENGTHEN on elliptical arcs and splines; closed splines trim to one piece; trim/extend section 45% → 55% (#466) |
 | 2026-10-11 | minor | FILLET with elliptical arcs and splines; trim/extend section 55% → 65% (#466) |

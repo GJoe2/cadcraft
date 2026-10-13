@@ -23,7 +23,8 @@ use cadcraft_render::{DisplayList, Kind};
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::util::DeviceExt;
 
-/// Line/triangle vertex: position (2 × f32, relative to the origin) + sRGB colour (4 × u8).
+/// Line/triangle vertex: position (2 × f32, relative to the origin) + sRGB colour (4 × u8,
+/// premultiplied by its alpha: transparent objects blend with what is under them).
 const VERTEX_SIZE: usize = 12;
 /// Wide-line / point instance: a, b (2 × f32 each) + colour (4 × u8) + width in points (f32) +
 /// length along its polyline before `a`, in world units (f32; dashing).
@@ -93,6 +94,9 @@ impl FrameCap {
 #[derive(Clone, Copy, Debug)]
 pub struct GpuTarget {
     pub format: wgpu::TextureFormat,
+    /// The stencil buffer format of the render pass, when it has one (the native window asks
+    /// for one): clipped viewports are clipped with it.
+    pub stencil: Option<wgpu::TextureFormat>,
 }
 
 /// CPU-side vertex data for one display list, waiting to be uploaded.
@@ -146,6 +150,12 @@ pub fn wide_width(lw: f32, lwdisplay: bool) -> Option<f32> {
     (w > 1.0).then_some(w)
 }
 
+/// `c` with alpha `a`, premultiplied (as the pipelines blend).
+fn premultiplied(c: Rgb, a: u8) -> [u8; 4] {
+    let k = |v: u8| u8::try_from((u32::from(v) * u32::from(a) + 127) / 255).unwrap_or(v);
+    [k(c.0), k(c.1), k(c.2), a]
+}
+
 /// Convert a display list into vertex data relative to `origin`, colours resolved against `bg`.
 pub fn build_mesh(list: &DisplayList, origin: Vec2, bg: Rgb, lwdisplay: bool) -> MeshData {
     let mut m = MeshData {
@@ -155,8 +165,7 @@ pub fn build_mesh(list: &DisplayList, origin: Vec2, bg: Rgb, lwdisplay: bool) ->
         breaks: Vec::new(),
     };
     for prim in &list.prims {
-        let c = prim.display_rgb(bg);
-        let col = [c.0, c.1, c.2, 255];
+        let col = premultiplied(prim.display_rgb(bg), prim.alpha());
         let pts = list.points(prim);
         match prim.kind {
             Kind::Polyline => match wide_width(prim.lw, lwdisplay) {
@@ -204,10 +213,11 @@ pub fn build_mesh(list: &DisplayList, origin: Vec2, bg: Rgb, lwdisplay: bool) ->
     m
 }
 
-/// Vertex data drawing primitives `prims` of `list` as `width`-point lines in `color` (the
-/// selection highlight; dashed by the callback's `dash`). Fills are outlined by their bounding
-/// box, as on the CPU path; infinite lines are left to the CPU (they are clipped per frame).
-pub fn build_highlight_mesh(list: &DisplayList, prims: &[usize], origin: Vec2, color: [u8; 4], width: f32) -> MeshData {
+/// Vertex data drawing primitives `prims` of `list` in `color` (the selection highlight), as on
+/// the CPU path: lines `width` points wide, and fills filled, or with `dashed` (SELECTIONEFFECT 0;
+/// the callback's `dash` dashes the lines) outlined. A wipeout is always outlined, since filling it
+/// would hide the drawing; infinite lines are left to the CPU (they are clipped per frame).
+pub fn build_highlight_mesh(list: &DisplayList, prims: &[usize], origin: Vec2, color: [u8; 4], width: f32, dashed: bool) -> MeshData {
     let mut m = MeshData::default();
     for prim in prims.iter().filter_map(|&i| list.prims.get(i)) {
         let pts = list.points(prim);
@@ -227,14 +237,20 @@ pub fn build_highlight_mesh(list: &DisplayList, prims: &[usize], origin: Vec2, c
                     push_instance(&mut m.quads, p, p, color, 3.0, 0.0);
                 }
             }
+            Kind::Tris if !dashed => {
+                let fill = translucent(color, HIGHLIGHT_FILL_ALPHA);
+                for t in pts.as_chunks::<3>().0 {
+                    for q in t {
+                        push_vertex(&mut m.tris, rel(*q, origin), fill);
+                    }
+                }
+            }
             Kind::Tris | Kind::Mask => {
-                let bb = Bounds2::from_points(pts.iter().copied());
-                if !bb.is_empty() {
-                    let c = [bb.min, Vec2::new(bb.max.x, bb.min.y), bb.max, Vec2::new(bb.min.x, bb.max.y), bb.min];
+                for line in list.fill_outlines(prim) {
                     let mut run = 0.0;
-                    for s in c.windows(2) {
+                    for s in line.windows(2) {
                         if let [a, b] = s {
-                            push_instance(&mut m.quads, rel(*a, origin), rel(*b, origin), color, 1.0, run as f32);
+                            push_instance(&mut m.quads, rel(*a, origin), rel(*b, origin), color, width, run as f32);
                             run += a.dist(*b);
                         }
                     }
@@ -276,13 +292,28 @@ pub struct CanvasCallback {
     pub scale: f32,
     /// Canvas rect centre in points.
     pub center: [f32; 2],
-    /// Which buffers to draw: [`LAYER_DRAWING`] or [`LAYER_DRAG`].
+    /// Which buffers to draw: [`LAYER_DRAWING`], [`LAYER_DRAG`], [`LAYER_HIGHLIGHT`] or
+    /// [`LAYER_VIEWPORT`].
     pub layer: usize,
     /// Affine transform applied to the origin-relative positions before `offset`: the linear
     /// part (a, b, c, d as in `Mat3`) and the translation. [`IDENTITY_XFORM`] for the drawing.
     pub xform: [f32; 6],
     /// Dash period in points for wide lines (0 = solid): the selection highlight.
     pub dash: f32,
+    /// How the draw uses the stencil buffer.
+    pub stencil: Stencil,
+}
+
+/// How a [`CanvasCallback`] uses the stencil buffer ([`GpuTarget::stencil`]): a clipped
+/// viewport's outline is drawn as a triangle fan that flips a stencil bit ([`Stencil::Mask`],
+/// even-odd, as the outline clips on the CPU), then its contents draw only where the bit is set
+/// ([`Stencil::Inside`]). The stencil is cleared every frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stencil {
+    #[default]
+    Off,
+    Mask,
+    Inside,
 }
 
 /// The drawing's display list.
@@ -291,6 +322,21 @@ pub const LAYER_DRAWING: usize = 0;
 pub const LAYER_DRAG: usize = 1;
 /// The selection highlight, rebuilt only when the selection or the drawing changes.
 pub const LAYER_HIGHLIGHT: usize = 2;
+/// Model space seen through the active layout viewport, moved to its current view each frame.
+pub const LAYER_VIEWPORT: usize = 3;
+/// The outline of the active viewport when it is clipped (stencil only, see [`Stencil`]).
+pub const LAYER_MASK: usize = 4;
+
+/// Opacity of filled areas in the selection and hover highlight: see-through, so the lines and
+/// text on (and under) a highlighted hatch stay visible, as the reference app's dot pattern does.
+pub const HIGHLIGHT_FILL_ALPHA: f32 = 0.5;
+
+/// `c` at `alpha` opacity, premultiplied (as the pipelines blend).
+fn translucent(c: [u8; 4], alpha: f32) -> [u8; 4] {
+    let a = alpha.clamp(0.0, 1.0);
+    let m = |v: u8| (f32::from(v) * a).round() as u8;
+    [m(c[0]), m(c[1]), m(c[2]), m(c[3])]
+}
 pub const IDENTITY_XFORM: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 struct Batch {
@@ -313,8 +359,18 @@ struct Resources {
     line_pipeline: wgpu::RenderPipeline,
     tri_pipeline: wgpu::RenderPipeline,
     quad_pipeline: wgpu::RenderPipeline,
+    /// With a stencil buffer: the pipelines of [`Stencil::Mask`] and [`Stencil::Inside`].
+    clipped: Option<ClipPipelines>,
     linear_out: bool,
     layers: Vec<Layer>,
+}
+
+struct ClipPipelines {
+    /// Flips the stencil bit under each triangle; draws no colour.
+    mask: wgpu::RenderPipeline,
+    line: wgpu::RenderPipeline,
+    tri: wgpu::RenderPipeline,
+    quad: wgpu::RenderPipeline,
 }
 
 const UNIFORM_SIZE: u64 = 80;
@@ -346,11 +402,13 @@ fn px_to_clip(px: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(px.x / view.b.z * 2.0 - 1.0, 1.0 - px.y / view.b.w * 2.0, 0.0, 1.0);
 }
 
+// `c` is premultiplied sRGB; a linear target gets it linearised, still premultiplied.
 fn out_color(c: vec4<f32>) -> vec4<f32> {
     if (view.a.w > 0.5) {
-        let lo = c.rgb / 12.92;
-        let hi = pow((c.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
-        return vec4<f32>(select(hi, lo, c.rgb <= vec3<f32>(0.04045)), c.a);
+        let s = c.rgb / max(c.a, 0.0001);
+        let lo = s / 12.92;
+        let hi = pow((s + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+        return vec4<f32>(select(hi, lo, s <= vec3<f32>(0.04045)) * c.a, c.a);
     }
     return c;
 }
@@ -446,7 +504,31 @@ impl Resources {
             });
             Layer { uniform, bind_group, key: None, lines: Vec::new(), tris: Vec::new(), quads: Vec::new(), breaks: Vec::new() }
         };
-        let pipeline = |label: &str, vs: &str, topology: wgpu::PrimitiveTopology, buffer: wgpu::VertexBufferLayout<'static>| {
+        // A render pass with a stencil buffer needs every pipeline to name its format; only the
+        // clipped-viewport pipelines read or write it.
+        let face = |compare, pass_op| wgpu::StencilFaceState {
+            compare,
+            fail_op: wgpu::StencilOperation::Keep,
+            depth_fail_op: wgpu::StencilOperation::Keep,
+            pass_op,
+        };
+        let stencil_state = |s: Stencil| {
+            target.stencil.map(|format| {
+                let stencil = match s {
+                    Stencil::Off => wgpu::StencilState::default(),
+                    Stencil::Mask => {
+                        let f = face(wgpu::CompareFunction::Always, wgpu::StencilOperation::Invert);
+                        wgpu::StencilState { front: f, back: f, read_mask: 1, write_mask: 1 }
+                    }
+                    Stencil::Inside => {
+                        let f = face(wgpu::CompareFunction::Equal, wgpu::StencilOperation::Keep);
+                        wgpu::StencilState { front: f, back: f, read_mask: 1, write_mask: 0 }
+                    }
+                };
+                wgpu::DepthStencilState { format, depth_write_enabled: None, depth_compare: None, stencil, bias: wgpu::DepthBiasState::default() }
+            })
+        };
+        let pipeline = |label: &str, vs: &str, topology: wgpu::PrimitiveTopology, buffer: wgpu::VertexBufferLayout<'static>, s: Stencil| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -457,7 +539,7 @@ impl Resources {
                     compilation_options: Default::default(),
                 },
                 primitive: wgpu::PrimitiveState { topology, ..Default::default() },
-                depth_stencil: None,
+                depth_stencil: stencil_state(s),
                 multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
@@ -465,7 +547,7 @@ impl Resources {
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target.format,
                         blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
+                        write_mask: if s == Stencil::Mask { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL },
                     })],
                     compilation_options: Default::default(),
                 }),
@@ -473,12 +555,19 @@ impl Resources {
                 cache: None,
             })
         };
+        use wgpu::PrimitiveTopology::{LineList, TriangleList};
         Resources {
-            line_pipeline: pipeline("cad_lines", "vs_line", wgpu::PrimitiveTopology::LineList, vertex_layout()),
-            tri_pipeline: pipeline("cad_fills", "vs_line", wgpu::PrimitiveTopology::TriangleList, vertex_layout()),
-            quad_pipeline: pipeline("cad_quads", "vs_quad", wgpu::PrimitiveTopology::TriangleList, instance_layout()),
+            line_pipeline: pipeline("cad_lines", "vs_line", LineList, vertex_layout(), Stencil::Off),
+            tri_pipeline: pipeline("cad_fills", "vs_line", TriangleList, vertex_layout(), Stencil::Off),
+            quad_pipeline: pipeline("cad_quads", "vs_quad", TriangleList, instance_layout(), Stencil::Off),
+            clipped: target.stencil.map(|_| ClipPipelines {
+                mask: pipeline("cad_clip_mask", "vs_line", TriangleList, vertex_layout(), Stencil::Mask),
+                line: pipeline("cad_clip_lines", "vs_line", LineList, vertex_layout(), Stencil::Inside),
+                tri: pipeline("cad_clip_fills", "vs_line", TriangleList, vertex_layout(), Stencil::Inside),
+                quad: pipeline("cad_clip_quads", "vs_quad", TriangleList, instance_layout(), Stencil::Inside),
+            }),
             linear_out: target.format.is_srgb(),
-            layers: vec![layer(), layer(), layer()],
+            layers: (0..=LAYER_MASK).map(|_| layer()).collect(),
         }
     }
 }
@@ -561,16 +650,17 @@ impl GpuFaults {
 
 /// Create the canvas pipelines in the renderer's callback resources, and report wgpu errors and
 /// device loss to `faults` instead of panicking. Call once with the app's render state (eframe
-/// `CreationContext::wgpu_render_state`).
-pub fn install(rs: &egui_wgpu::RenderState, faults: &Arc<GpuFaults>) -> GpuTarget {
+/// `CreationContext::wgpu_render_state`) and the format of its render pass's stencil buffer,
+/// if it has one (eframe `NativeOptions::stencil_buffer`).
+pub fn install(rs: &egui_wgpu::RenderState, faults: &Arc<GpuFaults>, stencil: Option<wgpu::TextureFormat>) -> GpuTarget {
     let f = Arc::clone(faults);
     rs.device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| f.error(e.to_string())));
     let f = Arc::clone(faults);
     rs.device.set_device_lost_callback(move |reason, message| f.device_lost(reason, message));
-    let target = GpuTarget { format: rs.target_format };
+    let target = GpuTarget { format: rs.target_format, stencil: stencil.filter(|s| s.has_stencil_aspect()) };
     let res = Resources::new(&rs.device, target);
     rs.renderer.write().callback_resources.insert(res);
-    log::info!("gpu canvas: target {:?}", rs.target_format);
+    log::info!("gpu canvas: target {:?}, stencil {:?}", rs.target_format, target.stencil);
     target
 }
 
@@ -623,14 +713,24 @@ impl egui_wgpu::CallbackTrait for CanvasCallback {
         // Whole-screen device pixels; egui already set the scissor to the canvas clip rect.
         pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
         pass.set_bind_group(0, &res.bind_group, &[]);
+        let (tri, line, quad) = match (self.stencil, &shared.clipped) {
+            (Stencil::Off, _) => (&shared.tri_pipeline, &shared.line_pipeline, &shared.quad_pipeline),
+            // The outline is all triangles.
+            (Stencil::Mask, Some(c)) => (&c.mask, &c.mask, &c.mask),
+            (Stencil::Inside, Some(c)) => (&c.tri, &c.line, &c.quad),
+            // No stencil buffer: the canvas never asks for these.
+            (_, None) => return,
+        };
+        if self.stencil != Stencil::Off {
+            pass.set_stencil_reference(1);
+        }
+        let mask = self.stencil == Stencil::Mask;
         // Draw-order groups split at each wipeout; without wipeouts there is one group.
         let total = |bs: &[Batch]| bs.iter().map(|b| b.count as usize).sum::<usize>();
-        let all = [total(&res.tris), total(&res.lines), total(&res.quads)];
+        let all = [total(&res.tris), if mask { 0 } else { total(&res.lines) }, if mask { 0 } else { total(&res.quads) }];
         let mut from = [0usize; 3];
         for to in res.breaks.iter().copied().chain(std::iter::once(all)) {
-            for (i, (pipeline, batches)) in
-                [(&shared.tri_pipeline, &res.tris), (&shared.line_pipeline, &res.lines), (&shared.quad_pipeline, &res.quads)].into_iter().enumerate()
-            {
+            for (i, (pipeline, batches)) in [(tri, &res.tris), (line, &res.lines), (quad, &res.quads)].into_iter().enumerate() {
                 let parts = batch_ranges(batches.iter().map(|b| b.count), from[i]..to[i]);
                 if parts.is_empty() {
                     continue;
@@ -706,7 +806,7 @@ mod tests {
             tris: vec![Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)],
             ..Default::default()
         };
-        let p = |kind, start, len, lw| DPrim { handle: Handle(1), color: Rgb(255, 255, 255), aci7: true, lw, kind, start, len };
+        let p = |kind, start, len, lw| DPrim { handle: Handle(1), color: Rgb(255, 255, 255), aci7: true, lw, transparency: 0, kind, start, len };
         l.prims =
             vec![p(Kind::Polyline, 0, 3, 0.0), p(Kind::Tris, 0, 3, 0.0), p(Kind::Point, 3, 1, 0.0), p(Kind::Infinite { ray: false }, 0, 2, 0.0)];
         for v in l.verts.clone() {
@@ -719,7 +819,7 @@ mod tests {
     fn highlight_dashes_run_on_along_each_polyline() {
         let l = list();
         // The 3-point polyline (two unit segments) and the point marker.
-        let m = build_highlight_mesh(&l, &[0, 2], Vec2::new(1e6, 1e6), [1, 2, 3, 255], 1.5);
+        let m = build_highlight_mesh(&l, &[0, 2], Vec2::new(1e6, 1e6), [1, 2, 3, 255], 1.5, true);
         assert_eq!(m.quad_instances(), 3);
         let start = |i: usize| {
             let o = i * INSTANCE_SIZE + 24;
@@ -727,6 +827,31 @@ mod tests {
         };
         assert_eq!([start(0), start(1), start(2)], [0.0, 1.0, 0.0]);
         assert!(m.lines.is_empty() && m.tris.is_empty());
+    }
+
+    #[test]
+    fn highlight_fills_fills_and_outlines_wipeouts() {
+        let mut l = list();
+        // The filled triangle (0,0) (1,0) (0,1) is filled in the highlight colour...
+        let m = build_highlight_mesh(&l, &[1], Vec2::ZERO, [1, 2, 3, 255], 1.5, false);
+        assert_eq!((m.tri_vertices(), m.quad_instances()), (3, 0));
+        assert_eq!(&m.tris[8..12], &[1, 1, 2, 128], "in the highlight colour, see-through (premultiplied)");
+        // ...or, dashed (SELECTIONEFFECT 0), outlined by its three edges, the dash running on.
+        let m = build_highlight_mesh(&l, &[1], Vec2::ZERO, [1, 2, 3, 255], 1.5, true);
+        assert_eq!((m.tri_vertices(), m.quad_instances()), (0, 3));
+        let start = |i: usize| {
+            let o = i * INSTANCE_SIZE + 24;
+            f32::from_le_bytes([m.quads[o], m.quads[o + 1], m.quads[o + 2], m.quads[o + 3]])
+        };
+        let mut runs = [start(0), start(1), start(2)];
+        runs.sort_by(f32::total_cmp);
+        assert!(runs[0] == 0.0 && runs[1] > 0.9 && runs[2] > runs[1] + 0.9, "{runs:?}");
+        // A wipeout would hide the drawing if filled: outlined either way.
+        if let Some(p) = l.prims.get_mut(1) {
+            p.kind = Kind::Mask;
+        }
+        let m = build_highlight_mesh(&l, &[1], Vec2::ZERO, [1, 2, 3, 255], 1.5, false);
+        assert_eq!((m.tri_vertices(), m.quad_instances()), (0, 3));
     }
 
     #[test]
@@ -743,6 +868,25 @@ mod tests {
         assert_eq!(&m.lines[8..12], &[0, 0, 0, 255]);
         let x = f32::from_le_bytes([m.lines[12], m.lines[13], m.lines[14], m.lines[15]]);
         assert_eq!(x, 1.0);
+    }
+
+    #[test]
+    fn transparent_objects_get_premultiplied_alpha() {
+        let mut l = list();
+        for p in &mut l.prims {
+            p.transparency = 50;
+        }
+        // Colour 7 on a black background is white: half of it, premultiplied.
+        let m = build_mesh(&l, Vec2::ZERO, Rgb(0, 0, 0), false);
+        assert_eq!(&m.lines[8..12], &[128, 128, 128, 128]);
+        assert_eq!(&m.tris[8..12], &[128, 128, 128, 128]);
+        // A wipeout's mask stays opaque.
+        if let Some(p) = l.prims.get_mut(1) {
+            p.kind = Kind::Mask;
+        }
+        let m = build_mesh(&l, Vec2::ZERO, Rgb(10, 20, 30), false);
+        assert_eq!(&m.tris[8..12], &[10, 20, 30, 255]);
+        assert_eq!(premultiplied(Rgb(255, 0, 0), 255), [255, 0, 0, 255], "opaque colours are unchanged");
     }
 
     #[test]

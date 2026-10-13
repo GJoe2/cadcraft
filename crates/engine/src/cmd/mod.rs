@@ -5,7 +5,7 @@ pub(crate) mod annoscale;
 mod annotate;
 mod array;
 mod audit;
-mod blocks;
+pub(crate) mod blocks;
 pub mod clipboard;
 pub mod constraints;
 mod draw;
@@ -21,7 +21,9 @@ pub(crate) mod hatch;
 mod inquiry;
 mod layer;
 mod layout;
+mod lisp;
 mod mleader_content;
+mod mleader_edit;
 mod modify;
 mod modify2;
 mod mtext_opts;
@@ -176,6 +178,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(draw::specs());
         v.extend(draw2::specs());
         v.extend(annotate::specs());
+        v.extend(mleader_edit::specs());
         v.extend(annoscale::specs());
         v.extend(hatch::specs());
         v.extend(overkill::specs());
@@ -198,6 +201,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(table::specs());
         v.extend(tolerance::specs());
         v.extend(constraints::specs());
+        v.extend(lisp::specs());
         v
     })
 }

@@ -23,14 +23,16 @@ mod web {
     const CANVAS_ID: &str = "cadcraft_canvas";
     const LOADING_ID: &str = "cadcraft_loading";
 
-    /// The app, the files File > Open… and drag and drop read for it in the background, and the
-    /// page embedding it (`?host=parent`).
-    struct Shell(CadApp, crate::upload::Inbox, Option<(crate::host::Bridge, crate::host::DirtyReport)>);
+    /// The app, the files File > Open… and drag and drop read for it in the background, the
+    /// page embedding it (`?host=parent`), and the browser's `prefers-reduced-motion` (it stays
+    /// live, so View ▸ Accessibility ▸ Animation Effects ▸ Use System Setting follows a change).
+    struct Shell(CadApp, crate::upload::Inbox, Option<(crate::host::Bridge, crate::host::DirtyReport)>, Option<web_sys::MediaQueryList>);
 
     impl eframe::App for Shell {
         fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             self.1.take_dropped(ctx);
             self.1.drain(&mut self.0);
+            self.0.system_animations = self.3.as_ref().map(|reduced| !reduced.matches());
             self.0.logic(ctx);
             if let Some((bridge, reported)) = &self.2 {
                 bridge.report_dirty(&self.0, reported);
@@ -80,6 +82,11 @@ mod web {
         cadcraft_engine::cmd::file::set_write_as(|d, name, o| {
             cadcraft_io::write_with(d, name, &cadcraft_io::SaveOptions { version: o.version, binary: o.binary }).map_err(|e| e.to_string())
         });
+        // AutoLISP's entget, entmake and entmod see entities as DXF groups.
+        cadcraft_engine::cmd::file::set_entity_codec(cadcraft_engine::cmd::file::EntityCodec {
+            groups: cadcraft_io::entity_groups,
+            entity: cadcraft_io::entity_from_groups,
+        });
         // `?host=parent`: a same-origin page framing CADCraft (such as a Nextcloud app) opens
         // drawings in it and stores what it saves. Otherwise there is no file system here: saved
         // files reach the user as browser downloads.
@@ -124,7 +131,9 @@ mod web {
                         if !crate::wants_cpu(&query())
                             && let Some(rs) = &cc.wgpu_render_state
                         {
-                            app.set_wgpu(rs);
+                            // eframe's web runner has no stencil buffer: clipped layout
+                            // viewports stay in the layout's display list.
+                            app.set_wgpu(rs, None);
                         }
                         if query().contains("sample") {
                             let _ = app.run("ui.sample", serde_json::json!({}));
@@ -142,7 +151,8 @@ mod web {
                             bridge.post_ready();
                             (bridge, crate::host::DirtyReport::default())
                         });
-                        Ok(Box::new(Shell(app, inbox, host)))
+                        let reduced_motion = web_sys::window().and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok().flatten());
+                        Ok(Box::new(Shell(app, inbox, host, reduced_motion)))
                     }),
                 )
                 .await;

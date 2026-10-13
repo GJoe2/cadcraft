@@ -34,7 +34,8 @@ pub struct ForeignExtra {
     pub xdict: Option<Handle>,
     /// Objects of [`Foreign::objects`] that react to it (persistent reactors).
     pub reactors: Vec<Handle>,
-    /// Other applications' extended data: groups from `1001` on.
+    /// Other applications' extended data of a table record or block: groups from `1001` on. An
+    /// entity's is part of the entity ([`crate::Common::xdata`]), so it follows the entity's copies.
     pub xdata: Vec<RawTag>,
     /// The colour book colour (group 430) and the true colour (group 420) it was read with: it is
     /// written back while the colour is unchanged.
@@ -65,6 +66,11 @@ pub struct Foreign {
     pub records: BTreeMap<ForeignKey, ForeignExtra>,
     /// The roles of the file handles the kept data refers to, for objects CADCraft rewrites.
     pub targets: BTreeMap<Handle, ForeignKey>,
+    /// The file's data store section (ACDSDATA, AutoCAD 2013 and later), as read: its groups
+    /// after the section name. It holds the ACIS geometry of 3D solids, regions, bodies and
+    /// surfaces, which from 2013 on those entities don't carry themselves: each `ACDSRECORD`
+    /// names its entity with a 320 handle (see [`Foreign::data_store_entities`]).
+    pub data_store: Vec<RawTag>,
 }
 
 impl Foreign {
@@ -75,5 +81,11 @@ impl Foreign {
             && self.records.is_empty()
             && self.classes.is_empty()
             && self.targets.is_empty()
+            && self.data_store.is_empty()
+    }
+
+    /// The entities the data store has records for (their 320 handles).
+    pub fn data_store_entities(&self) -> std::collections::BTreeSet<Handle> {
+        self.data_store.iter().filter(|t| t.code == 320).filter_map(|t| Handle::parse_hex(t.value.trim())).collect()
     }
 }

@@ -333,6 +333,10 @@
 	Import	Importieren
 	In	Vergrößern
 	In-window Menu Bar	Menüleiste im Fenster
+	Align Multileaders	Mehrfachführungslinien ausrichten
+	Collect	Sammeln
+	Collect Multileaders	Mehrfachführungslinien sammeln
+	Edit Multileader	Mehrfachführungslinie bearbeiten
 	Include in new selection set	In neuen Auswahlsatz aufnehmen
 	Increment angle	Inkrementwinkel
 	Index Color	Indexfarbe
@@ -669,6 +673,11 @@
 	Select an object to change or	Wählen Sie ein zu änderndes Objekt oder
 	Select an object to measure or	Wählen Sie ein zu messendes Objekt oder
 	Select an object.	Wählen Sie ein Objekt.
+	Add to Working Set	Zum Arbeitssatz hinzufügen
+	Edit Reference In-Place	Referenz an Ort und Stelle bearbeiten
+	Save Reference Edits	Referenzänderungen speichern
+	Working Set	Arbeitssatz
+	Xref and Block In-place Editing	Xref- und Block-Bearbeitung am Ort
 	Select an open curve.	Wählen Sie eine offene Kurve.
 	Select an open line, arc, polyline, ellipse arc or spline.	Wählen Sie eine offene Linie, einen Bogen, eine Polylinie, einen Ellipsenbogen oder einen Spline.
 	Select arc or circle	Wählen Sie einen Bogen oder Kreis
@@ -995,6 +1004,8 @@
 	Hide Others	Andere ausblenden
 	Accessibility	Bedienungshilfen
 	Show System Cursor	Systemzeiger anzeigen
+	Animation Effects	Animationseffekte
+	Animation effects	Animationseffekte
 	3D Mouse...	3D-Maus...
 	3D Mouse	3D-Maus
 	Calibrate 3D Mouse	3D-Maus kalibrieren
@@ -1015,3 +1026,11 @@
 	Left device button: zoom extents. Right device button: calibrate.	Linke Gerätetaste: auf Grenzen zoomen. Rechte Gerätetaste: kalibrieren.
 	Hatch Pattern	Schraffurmuster
 	Search for pattern	Muster suchen
+	Not a number or distance: {text}	Keine Zahl und keine Entfernung: {text}
+	Query Texts	Texte abfragen
+	Italic	Kursiv
+	Underline	Unterstrichen
+	Overline	Überstrichen
+	Justify	Blocksatz
+	Text color	Textfarbe
+	Click the ruler to add a tab stop, right-click to remove one	Klick auf das Lineal setzt einen Tabstopp, Rechtsklick entfernt ihn

@@ -11,11 +11,14 @@
 pub mod assoc;
 pub mod audit;
 pub mod autosave;
+pub mod blockedit;
 pub mod cmd;
 mod finite;
 pub mod grip_dims;
 pub mod grips;
 mod guard;
+pub mod lisp;
+pub mod mtext_edit;
 pub mod pointmod;
 pub mod prompt;
 mod recent;
@@ -37,7 +40,7 @@ use serde_json::Value;
 pub use cadcraft_doc as doc;
 pub use cadcraft_geom as geom;
 pub use cadcraft_render as render;
-pub use cmd::hatch::{PatternChoice, pattern_choices};
+pub use cmd::hatch::{HatchPicks, PatternChoice, PickMode, pattern_choices};
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
 pub use prompt::{Accept, Drag, Input, Interactive, Picker, Prompt, Step};
 
@@ -77,6 +80,10 @@ impl Default for View {
     fn default() -> Self {
         View { center: Vec2::new(6.0, 4.5), height: 10.0 }
     }
+}
+
+fn usable_view(v: &View) -> bool {
+    v.center.is_finite() && v.height.is_finite() && v.height > 1e-12
 }
 
 /// Tiled model viewports (VPORTS): the session side of the drawing's `*Active` configuration.
@@ -132,6 +139,9 @@ pub struct DocState {
     pub uid: u64,
     /// The drawing is saved as binary DXF (it was opened from one, or last saved as one).
     pub binary_dxf: bool,
+    /// The Block Editor (BEDIT), when it is open: `doc` is then the editor's drawing, and the
+    /// drawing itself waits in it ([`DocState::drawing`]).
+    pub block_edit: Option<blockedit::BlockEdit>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -157,10 +167,13 @@ impl DocState {
             view_history: Vec::new(),
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             binary_dxf: false,
+            block_edit: None,
         }
     }
+    /// The drawing has changes not saved to its file, or the Block Editor has changes not yet
+    /// saved into its block.
     pub fn is_dirty(&self) -> bool {
-        !Arc::ptr_eq(&self.doc, &self.saved)
+        !Arc::ptr_eq(self.drawing(), &self.saved) || self.block_unsaved()
     }
     /// After undo/redo replaced the drawing (`before` is the one shown until then): if the current
     /// layout no longer exists, follow it to its other name when it was renamed (same tab order,
@@ -220,7 +233,9 @@ impl DocState {
         }
     }
     /// Map a requested screen view to the paper view, or (in MSPACE) to the viewport's model view.
-    fn store_view(&mut self, v: View) {
+    /// A finite request can still map to a view too large to represent: then nothing changes and
+    /// this returns false.
+    fn store_view(&mut self, v: View) -> bool {
         if let Some((h, vp)) = self.active_viewport() {
             let pv = self.paper_view();
             let k = v.height / pv.height.max(1e-12);
@@ -228,10 +243,17 @@ impl DocState {
                 // A locked viewport keeps its scale: pan/zoom the sheet instead.
                 let k0 = vp.view_height / vp.height;
                 let pc = vp.center.xy() + (v.center - vp.view_center) / k0;
-                self.put_paper_view(View { center: pc, height: v.height / k0 });
+                let paper = View { center: pc, height: v.height / k0 };
+                if !usable_view(&paper) {
+                    return false;
+                }
+                self.put_paper_view(paper);
             } else {
                 let center = v.center - (pv.center - vp.center.xy()) * k;
                 let height = vp.height * k;
+                if !usable_view(&View { center, height }) {
+                    return false;
+                }
                 let doc = Arc::make_mut(&mut self.doc);
                 if let Some(store) = doc.space_mut(&self.space.clone()) {
                     store.modify(h, |e| {
@@ -242,9 +264,10 @@ impl DocState {
                     });
                 }
             }
-            return;
+            return true;
         }
         self.put_paper_view(v);
+        true
     }
     fn put_paper_view(&mut self, v: View) {
         match self.views.iter_mut().find(|(s, _)| *s == self.space) {
@@ -252,18 +275,23 @@ impl DocState {
             None => self.views.push((self.space.clone(), v)),
         }
     }
-    pub fn set_view(&mut self, v: View) {
-        if !(v.center.is_finite() && v.height.is_finite() && v.height > 1e-12) {
-            return;
+    /// Set the view, recording view history. Returns false, changing nothing, when the view (or,
+    /// in MSPACE, the viewport view it maps to) isn't finite with a positive height.
+    pub fn set_view(&mut self, v: View) -> bool {
+        if !usable_view(&v) {
+            return false;
         }
         let old = self.view();
+        if !self.store_view(v) {
+            return false;
+        }
         if old != v {
             self.view_history.push(old);
             if self.view_history.len() > 50 {
                 self.view_history.remove(0);
             }
         }
-        self.store_view(v);
+        true
     }
     /// The active MSPACE viewport when ZOOM works on its own view, as in AutoCAD: extents and
     /// windows fit the viewport, and zooms keep its centre. A locked viewport keeps its scale, so
@@ -345,7 +373,11 @@ pub struct Settings {
     /// prompt's options there (on by default).
     pub dynprompt: bool,
     pub lwdisplay: bool,
+    /// TRANSPARENCYDISPLAY: draw objects with their transparency on screen (on by default).
     pub transparency_display: bool,
+    /// PLOTTRANSPARENCYOVERRIDE: 0 never plots transparency, 1 (default) uses the page setup's or
+    /// the Plot dialog's "Plot transparency", 2 always plots it.
+    pub plot_transparency_override: u8,
     pub selection_cycling: bool,
     /// SELECTSIMILARMODE: what SELECTSIMILAR matches besides the object type (bits: 1 colour,
     /// 2 layer, 4 linetype, 8 linetype scale, 16 lineweight, 32 plot style, 64 object style,
@@ -357,6 +389,8 @@ pub struct Settings {
     /// APERTURE in pixels.
     pub aperture: f64,
     pub pickfirst: bool,
+    /// ACADLSPASDOC: acad.lsp loads into every drawing, not once per session.
+    pub acadlspasdoc: bool,
     pub pickadd: bool,
     /// PICKSTYLE: bit 1 picks whole selectable groups ([`cmd::groups`]), bit 2 associative hatches
     /// with their boundaries (stored, not used yet).
@@ -373,6 +407,32 @@ pub struct Settings {
     pub annoautoscale: bool,
     /// QPMODE: show the Quick Properties palette when objects are selected.
     pub qpmode: bool,
+    /// HIGHLIGHT: selected objects are highlighted (their grips show either way). Not saved:
+    /// every session starts with it on, as in AutoCAD, so it can't stay off unnoticed.
+    pub highlight: bool,
+    /// SELECTIONEFFECT: how selected objects are highlighted: 0 dashed, 1 redrawn in the
+    /// selection colour.
+    pub selectioneffect: u8,
+    /// SELECTIONPREVIEW bits: the object under the cursor is highlighted (1) when no command is
+    /// active, (2) when a command asks for objects.
+    pub selectionpreview: u8,
+    /// PREVIEWEFFECT: how that object is highlighted: 0 dashed, 1 thicker, 2 dashed and thicker.
+    pub previeweffect: u8,
+    /// PREVIEWFILTER bits: objects the cursor never highlights: 1 on locked layers, 2 xrefs,
+    /// 4 tables, 8 multiline text, 16 hatches, 32 in groups.
+    pub previewfilter: u8,
+    /// GRIPS: selected objects show their grips (0 off; AutoCAD's 2, more grips on polylines,
+    /// shows them as 1 does).
+    pub grips: u8,
+    /// GRIPOBJLIMIT: no grips while more objects than this are selected (0: no limit).
+    pub gripobjlimit: u32,
+    /// SELECTIONAREA: the selection window and crossing areas are filled.
+    pub selectionarea: bool,
+    /// WINDOWAREACOLOR, CROSSINGAREACOLOR: their colours (ACI 1-255).
+    pub windowareacolor: u8,
+    pub crossingareacolor: u8,
+    /// SELECTIONAREAOPACITY: their opacity, 0-100.
+    pub selectionareaopacity: u8,
     /// POLARMODE bits ([`snap::tracking::polarmode`]); polar tracking itself is on while
     /// `polarmode` is (AUTOSNAP bit 8, F10).
     pub polar_flags: u32,
@@ -407,13 +467,15 @@ impl Default for Settings {
             dynpi_absolute: false,
             dynprompt: true,
             lwdisplay: false,
-            transparency_display: false,
+            transparency_display: true,
+            plot_transparency_override: 1,
             selection_cycling: false,
             selectsimilarmode: 130,
             otrack: true,
             pickbox: 3.0,
             aperture: 10.0,
             pickfirst: true,
+            acadlspasdoc: false,
             pickadd: true,
             pickstyle: 1,
             gripsize: 5.0,
@@ -424,6 +486,17 @@ impl Default for Settings {
             annoallvisible: true,
             annoautoscale: false,
             qpmode: false,
+            highlight: true,
+            selectioneffect: 1,
+            selectionpreview: 3,
+            previeweffect: 2,
+            previewfilter: 3,
+            grips: 1,
+            gripobjlimit: 100,
+            selectionarea: true,
+            windowareacolor: 150,
+            crossingareacolor: 100,
+            selectionareaopacity: 25,
             polar_flags: 0,
             polaraddang: Vec::new(),
             polarsnap: false,
@@ -555,6 +628,11 @@ pub struct Session {
     /// The last segment given at a point prompt (its base point and the point): polar angles
     /// relative to the last segment (POLARMODE bit 1) are measured from it.
     pub last_segment: Option<(Vec2, Vec2)>,
+    /// The last typed `@distance<angle` input, as `(distance, angle in radians)`.
+    /// Set by [`Session::typed`] and consumed by commands that resolve a deferred
+    /// tangent first point (e.g. [`cmd::draw::LineM`]) when the next point is typed
+    /// rather than clicked. Cleared at [`Session::start`].
+    pub last_polar: Option<(f64, f64)>,
     /// Point modifiers pending at the current point prompt (`FROM`, `M2P`, `.x`, `<a`…).
     pub point_mods: Vec<pointmod::Frame>,
     /// Cursor position in world coordinates (from the UI; used for direct distance entry).
@@ -587,6 +665,12 @@ pub struct Session {
     pub clipboard_source: Option<cmd::clipboard::ClipSource>,
     /// The window last picked with PLOTWINDOW (the Plot dialog's "Window <").
     pub plot_window: Option<cadcraft_geom::Bounds2>,
+    /// AutoLISP: each drawing's symbols and the routine running ([`lisp`]).
+    lisp: lisp::LispState,
+    /// How the last LISP run ended (its value or error message).
+    lisp_last: Option<std::result::Result<lisp::value::Value, String>>,
+    /// What the last HATCHPICK kept (the Hatch and Gradient dialog's picks).
+    pub hatch_picks: Option<cmd::hatch::HatchPicks>,
 }
 
 impl Default for Session {
@@ -614,6 +698,7 @@ impl Session {
             last_command: None,
             last_point: Vec2::ZERO,
             last_segment: None,
+            last_polar: None,
             point_mods: Vec::new(),
             cursor: Vec2::ZERO,
             cursor_deferred: None,
@@ -631,6 +716,9 @@ impl Session {
             last_used: LastUsed::default(),
             clipboard_source: None,
             plot_window: None,
+            lisp: lisp::LispState::default(),
+            lisp_last: None,
+            hatch_picks: None,
         }
     }
     pub fn new_drawing(&mut self, metric: bool) -> usize {
@@ -638,6 +726,7 @@ impl Session {
         let d = if metric { Drawing::new_metric() } else { Drawing::new_imperial() };
         let mut st = DocState::new(d, &format!("Drawing{}", self.untitled_counter), None);
         st.set_view_quiet(if metric { View { center: Vec2::new(210.0, 148.5), height: 297.0 } } else { View::default() });
+        self.end_running();
         self.docs.push(st);
         self.active = self.docs.len() - 1;
         self.active
@@ -651,9 +740,31 @@ impl Session {
                 height: (ext.height().max(ext.width() * self.viewport_px.1 / self.viewport_px.0.max(1.0)) * 1.1).max(1e-6),
             });
         }
+        self.end_running();
         self.docs.push(st);
         self.active = self.docs.len() - 1;
         self.active
+    }
+    /// A command still waiting for input belongs to the drawing it started in: end it there
+    /// before another drawing becomes current, so its undo step lands in that drawing.
+    fn end_running(&mut self) {
+        if self.running.is_some() {
+            self.cancel();
+        }
+    }
+
+    /// Add a file read off-thread with [`cmd::file::read_file`] as the active drawing (OPEN's fast
+    /// half). A panic while adding it is reported as an error, never propagated.
+    pub fn finish_open(&mut self, f: cmd::file::ReadFile) -> Result<Value> {
+        let n = self.docs.len();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd::file::finish_open(self, f))) {
+            Ok(r) => r,
+            Err(_) => {
+                self.docs.truncate(n);
+                self.active = self.active.min(self.docs.len().saturating_sub(1));
+                Err(EngineError::Internal("open".into(), "panic".into()))
+            }
+        }
     }
 
     pub fn state(&self) -> Result<&DocState> {
@@ -752,7 +863,11 @@ impl Session {
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         (spec.enabled)(self).map_err(|m| EngineError::Disabled(spec.id.into(), m))?;
+        if let Some(why) = cmd::blocks::bedit::refused_in_editor(self, spec.id) {
+            return Err(EngineError::Disabled(spec.id.into(), why));
+        }
         let before = self.state().ok().map(|s| (s.doc.clone(), s.selection.clone(), s.uid));
+        let editing = self.state().is_ok_and(|s| s.block_edit.is_some());
         let run = spec.run;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self, params)));
         let result = match result {
@@ -770,19 +885,29 @@ impl Session {
                 return Err(EngineError::Internal(id.into(), msg));
             }
         };
-        cmd::groups::after_command(self, before.as_ref().map(|b| &b.0));
-        cmd::constraints::after_command(self, before.as_ref().map(|b| &b.0), spec.undoable && result.is_ok());
-        assoc::after_command(self, before.as_ref().map(|b| &b.0), before.as_ref().map(|b| b.2));
+        let violation = before.as_ref().and_then(|b| cmd::blocks::refedit::after_command(self, &b.0, spec.id));
+        let result = match (violation, result) {
+            (Some(m), Ok(_)) => Err(EngineError::Other(m)),
+            (_, r) => r,
+        };
+        // Opening or closing the Block Editor swaps the whole drawing: nothing in it changed.
+        if self.state().is_ok_and(|s| s.block_edit.is_some()) == editing {
+            self.after_command(before.as_ref().map(|b| &b.0), before.as_ref().map(|b| b.2), spec.undoable && result.is_ok());
+        }
         let result = match (result, &before) {
             (Ok(v), Some((doc, sel, uid))) if spec.undoable => self.refuse_non_finite(Some(*uid), doc, sel, spec.id).map(|()| v),
             (r, _) => r,
         };
+        let grouped = self.lisp_groups_undo();
         if spec.undoable
             && let Some((doc, sel, uid)) = before
             && let Some(st) = self.docs.iter_mut().find(|d| d.uid == uid)
             && !Arc::ptr_eq(&doc, &st.doc)
         {
-            st.push_undo(Snapshot { label: spec.label.to_string(), doc, selection: sel });
+            // Inside a LISP routine the routine's single undo step records it.
+            if !grouped {
+                st.push_undo(Snapshot { label: spec.label.to_string(), doc, selection: sel });
+            }
             st.revision += 1;
         }
         result
@@ -799,6 +924,7 @@ impl Session {
 
     /// Start a command by name or alias as if typed at the command line.
     pub fn start(&mut self, name: &str) -> Result<()> {
+        self.last_polar = None;
         let name = name.trim();
         let (transparent, name) = match name.strip_prefix('\'') {
             Some(n) => (true, n),
@@ -808,7 +934,24 @@ impl Session {
         // A command-line form with an id of its own (-ATTEDIT) is not the command it prefixes.
         let dashed = cmd::resolve_alias(&name.trim_start_matches(['_', '.']).to_ascii_lowercase());
         let id = if find_command(&dashed).is_some() { dashed } else { cmd::resolve_alias(&lower) };
-        let spec = find_command(&id).ok_or_else(|| EngineError::UnknownCommand(name.to_string()))?;
+        let Some(spec) = find_command(&id) else {
+            // A command defined in LISP: (defun c:NAME …).
+            if !transparent && let Some(f) = self.lisp_command(&lower) {
+                if self.running.is_some() {
+                    self.cancel();
+                }
+                self.last_command = Some(lower.clone());
+                self.echo(format!("Command: {}", lower.to_ascii_uppercase()));
+                return self.lisp_run_command(&lower, f);
+            }
+            // A bare system variable name (ORTHOMODE, GRIDMODE…) acts as SETVAR on that variable.
+            let var = lower.to_ascii_uppercase();
+            if !name.starts_with(['_', '.', '-']) && sysvars::get(self, &var).is_some() {
+                self.start(if transparent { "'setvar" } else { "setvar" })?;
+                return self.input(Input::Text(var));
+            }
+            return Err(EngineError::UnknownCommand(name.to_string()));
+        };
         if transparent && spec.transparent && self.running.is_some() {
             // Transparent commands (zoom, pan…) run without cancelling the active one.
             if spec.interactive.is_none() {
@@ -821,10 +964,19 @@ impl Session {
             }
         }
         let nested = transparent && spec.transparent && self.running.is_some() && spec.interactive.is_some();
+        // Ctrl+Z / U / UNDO while a command's prompt offers its own Undo keyword (LINE, PLINE…)
+        // takes back the last segment and keeps the command running, as the keyword does.
+        if !nested && matches!(spec.id, "u" | "undo") && self.current_prompt().is_some_and(|p| p.keywords.iter().any(|k| k == "Undo")) {
+            self.echo(format!("Command: {}", spec.id.to_ascii_uppercase()));
+            return self.input(Input::Keyword("Undo".into()));
+        }
         if !nested && self.running.is_some() {
             self.cancel();
         }
         (spec.enabled)(self).map_err(|m| EngineError::Disabled(spec.id.into(), m))?;
+        if let Some(why) = cmd::blocks::bedit::refused_in_editor(self, spec.id) {
+            return Err(EngineError::Disabled(spec.id.into(), why));
+        }
         if nested {
             // The outer command stays the one Enter repeats.
             self.echo(format!(">>{}", spec.id.to_ascii_uppercase()));
@@ -874,8 +1026,18 @@ impl Session {
     }
 
     /// Give an input to the running command. With no command running, `Enter` repeats the last
-    /// command (as in AutoCAD) and points do nothing.
+    /// command (as in AutoCAD) and points do nothing. A LISP routine waiting in a `get…`
+    /// function takes the input instead; one paused in `command` carries on after it.
     pub fn input(&mut self, input: Input) -> Result<()> {
+        if self.lisp_input(input.clone()) {
+            return Ok(());
+        }
+        let r = self.input_to_command(input);
+        self.lisp_after_command_input();
+        r
+    }
+
+    fn input_to_command(&mut self, input: Input) -> Result<()> {
         if self.running.is_none() {
             if input == Input::Enter
                 && let Some(last) = self.last_command.clone()
@@ -1108,11 +1270,13 @@ impl Session {
         self.select_mode = None;
         let label = find_command(&run.id).map(|c| c.label).unwrap_or("Command");
         let _ = cancelled;
-        cmd::groups::after_command(self, Some(&run.before));
-        cmd::constraints::after_command(self, Some(&run.before), true);
-        assoc::after_command(self, Some(&run.before), None);
-        if self.suspended.is_some() {
-            // A transparent command's changes belong to the undo step of the command it ran inside.
+        if let Some(m) = cmd::blocks::refedit::after_command(self, &run.before, &run.id) {
+            self.echo(m);
+        }
+        self.after_command(Some(&run.before), None, true);
+        // A transparent command's changes belong to the command it ran inside, and a command a
+        // LISP routine ran belongs to the routine's single undo step.
+        if self.suspended.is_some() || self.lisp_groups_undo() {
             if let Ok(st) = self.state_mut()
                 && !Arc::ptr_eq(&run.before, &st.doc)
             {
@@ -1128,7 +1292,20 @@ impl Session {
         }
     }
 
-    /// After a transparent command ends, the command it interrupted prompts again.
+    /// The post-command passes, in order, run after every command — by [`Session::execute`] and
+    /// when an interactive command finishes — so their edits land in the command's own undo step:
+    /// group membership is pruned, constraints are inferred, purged and re-solved, and
+    /// associative dimensions and hatches follow their sources. A new pass is added here, once.
+    ///
+    /// `before` is the drawing the command started from; `uid` (when known) is the document it
+    /// started in, so associativity is not applied across a document switch; `ok` is false for a
+    /// failed or non-undoable programmatic command, which skips the constraint pass.
+    fn after_command(&mut self, before: Option<&Arc<Drawing>>, uid: Option<u64>, ok: bool) {
+        cmd::groups::after_command(self, before);
+        cmd::constraints::after_command(self, before, ok);
+        assoc::after_command(self, before, uid);
+    }
+
     fn resume_suspended(&mut self) {
         if let Some(outer) = self.suspended.take() {
             self.echo(format!("Resuming {} command.", outer.id.to_ascii_uppercase()));
@@ -1140,6 +1317,15 @@ impl Session {
     /// transparent command, cancels it and the command it interrupted.
     pub fn cancel(&mut self) {
         self.point_mods.clear();
+        // Esc stops a LISP routine waiting for input, and the command it paused in.
+        if self.lisp_waiting() {
+            if self.running.is_some() {
+                let _ = self.feed(Some(Input::Cancel));
+            }
+            self.echo("*Cancel*");
+            self.lisp_abort("Function cancelled");
+            return;
+        }
         if self.running.is_some() {
             if self.suspended.is_some() {
                 if let Some(nested) = self.running.take() {
@@ -1154,7 +1340,16 @@ impl Session {
         }
     }
 
+    /// The multiline text the running command is collecting, for the in-place editor
+    /// ([`Interactive::editing_mtext`]).
+    pub fn editing_mtext(&self) -> Option<cadcraft_doc::MText> {
+        self.running.as_ref().and_then(|r| r.machine.editing_mtext())
+    }
+
     pub fn current_prompt(&self) -> Option<Prompt> {
+        if let Some(p) = self.lisp_prompt() {
+            return Some(p);
+        }
         self.running.as_ref().map(|r| {
             let p = r.machine.prompt(self);
             match &self.select_mode {
@@ -1174,8 +1369,26 @@ impl Session {
         }
     }
 
+    /// Whether the object under the cursor is highlighted (SELECTIONPREVIEW): the cursor picks
+    /// objects ([`Self::picking_objects`]) and the bit for a command asking for them (2) or for
+    /// no command (1) is on.
+    pub fn previews_selection(&self) -> bool {
+        let bit = if self.current_prompt().is_some() { 2 } else { 1 };
+        self.picking_objects() && self.settings.selectionpreview & bit != 0
+    }
+
+    /// Whether selected objects show grips while `selected` objects are selected (GRIPS,
+    /// GRIPOBJLIMIT).
+    pub fn shows_grips(&self, selected: usize) -> bool {
+        let limit = self.settings.gripobjlimit;
+        self.settings.grips > 0 && (limit == 0 || selected <= limit as usize)
+    }
+
     /// The text shown on the command line: the active prompt, or "Command:".
     pub fn prompt_text(&self) -> String {
+        if let Some(p) = self.lisp_prompt() {
+            return p.display();
+        }
         match &self.running {
             Some(r) if self.suspended.is_some() => format!(">>{} {}", r.id.to_ascii_uppercase(), r.machine.prompt(self).display()),
             Some(r) => format!("{} {}", r.id.to_ascii_uppercase(), r.machine.prompt(self).display()),
@@ -1185,9 +1398,13 @@ impl Session {
 
     /// Rubber-band preview entities for the cursor.
     pub fn preview(&self, cursor: Vec2) -> Vec<Entity> {
-        let Some(r) = &self.running else { return Vec::new() };
         let common = self.current_common();
-        r.machine.preview(self, cursor).into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect()
+        let kinds = match (self.lisp_preview(cursor), &self.running) {
+            (Some(k), _) => k,
+            (None, Some(r)) => r.machine.preview(self, cursor),
+            (None, None) => Vec::new(),
+        };
+        kinds.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect()
     }
 
     /// The active command's preview as a transform of existing objects (see
@@ -1245,14 +1462,17 @@ impl Session {
                 return self.typed(rest);
             }
             first = false;
-            let (tok, more) = match rest.split_once([' ', '\t']) {
-                Some((tok, more)) => (tok, Some(more)),
-                None => (rest, None),
-            };
-            if self.running.is_some() {
+            let (tok, more) = next_token(rest);
+            if self.running.is_some() || self.lisp_prompt().is_some() {
                 self.typed(tok)?;
             } else if tok.trim().is_empty() {
                 self.input(Input::Enter)?;
+            } else if lisp_expression(tok) {
+                // `(expression)` or `!variable` at Command: evaluates LISP and shows the value.
+                let src = tok.trim().strip_prefix('!').unwrap_or(tok.trim()).to_string();
+                if let Err(e) = self.lisp_eval(&src, true, false, Vec::new()) {
+                    self.echo(e.to_string());
+                }
             } else {
                 self.start(tok)?;
             }
@@ -1278,17 +1498,47 @@ impl Session {
         if tt.starts_with('\'') {
             return self.start(tt);
         }
+        // A LISP expression typed at a command's prompt: its value is the answer.
+        // Not at a free-text prompt: there the text is the answer (CAL takes "(3+4)*2").
+        if lisp_expression(tt) && !prompt.accept.text && self.lisp_prompt().is_none() && !self.lisp_groups_undo() {
+            let src = tt.strip_prefix('!').unwrap_or(tt).to_string();
+            let v = match self.lisp_eval(&src, false, true, Vec::new()) {
+                Ok(Some(Ok(v))) => v,
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    self.echo(e.to_string());
+                    return Ok(());
+                }
+            };
+            return match v {
+                lisp::value::Value::Nil => Ok(()),
+                lisp::value::Value::Int(i) => self.typed(&i.to_string()),
+                lisp::value::Value::Real(r) => self.typed(&format!("{r}")),
+                lisp::value::Value::Str(s) => self.typed(&s),
+                other => match other.as_point() {
+                    Some(p) => self.input(Input::Point(Vec2::new(p[0], p[1]))),
+                    None => {
+                        self.echo(format!("Invalid input: {}", lisp::value::to_text(&other, true)));
+                        Ok(())
+                    }
+                },
+            };
+        }
         // At "Select objects" prompts the selection modes (Previous, Last, ALL) win over a command
         // keyword sharing the letter (HATCH's "picK internal point" against `P`).
         let selection_mode = prompt.accept.select && matches!(tt.to_ascii_lowercase().as_str(), "all" | "l" | "last" | "p" | "previous");
+        // A leading underscore asks for a keyword by its English name, whatever the interface
+        // language (`_M`, `_Yes`): scripts and LISP routines write them that way. (Snap
+        // overrides such as `_cen` were taken above.)
         if !selection_mode
-            && let Some(k) = prompt.match_keyword(tt)
+            && let Some(k) = prompt.match_keyword(tt).or_else(|| tt.strip_prefix('_').and_then(|r| prompt.match_keyword(r)))
             && !(prompt.accept.number && tt.parse::<f64>().is_ok())
         {
             return self.input(Input::Keyword(k));
         }
         if prompt.accept.point {
             if let Some(p) = prompt::parse_point_with(tt, self.last_point, &self.angle_settings()) {
+                self.last_polar = prompt::parse_polar_text(tt, &self.angle_settings());
                 return self.input(Input::Point(p));
             }
             // Direct distance entry along the tracking path the cursor is on, from the point it
@@ -1303,7 +1553,7 @@ impl Session {
                 && !prompt.accept.number
             {
                 let mut c = self.cursor;
-                if self.settings.orthomode {
+                if self.settings.orthomode && !prompt.corner {
                     c = snap::iso::constrain(&self.drafting_settings(), base, c);
                 }
                 let dir = (c - base).normalized();
@@ -1479,6 +1729,7 @@ impl Session {
                 serde_json::json!({
                     "index": i, "title": d.title, "path": d.path, "dirty": d.is_dirty(),
                     "entities": d.doc.entity_count(), "active": i == self.active, "revision": d.revision,
+                    "blockEditor": d.block_editor(),
                 })
             })
             .collect();
@@ -1489,6 +1740,52 @@ impl Session {
             "selection": self.selection().iter().map(|h| h.hex()).collect::<Vec<_>>(),
             "settings": self.drafting_settings(),
         })
+    }
+}
+
+/// Typed text that is LISP: `(expression)` or `!variable`.
+fn lisp_expression(t: &str) -> bool {
+    let t = t.trim();
+    t.starts_with('(') || (t.starts_with('!') && t.len() > 1)
+}
+
+/// The next command-line input in `rest` and what follows it: up to a space or tab, except that
+/// a LISP expression runs to its closing parenthesis (spaces and quoted strings inside it).
+fn next_token(rest: &str) -> (&str, Option<&str>) {
+    let lead = rest.len() - rest.trim_start_matches('!').len();
+    if rest.get(lead..).is_some_and(|r| r.starts_with('(')) {
+        let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
+        for (i, c) in rest.char_indices().skip(lead) {
+            if in_str {
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => in_str = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = i + 1;
+                        // As after any input, a space ends it and a trailing one is Enter.
+                        let more = rest.get(end..).filter(|m| !m.is_empty()).map(|m| m.strip_prefix([' ', '\t']).unwrap_or(m));
+                        return (&rest[..end], more);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Unbalanced: all of it (the reader reports the error).
+        return (rest, None);
+    }
+    match rest.split_once([' ', '\t']) {
+        Some((tok, more)) => (tok, Some(more)),
+        None => (rest, None),
     }
 }
 

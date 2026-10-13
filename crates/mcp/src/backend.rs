@@ -21,13 +21,49 @@ pub struct Remote {
     addr: String,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
     next_id: u64,
+    /// Open the app when nothing answers (see [`Remote::lazy`]).
+    launch: bool,
 }
+
+/// How long a launched app has to open its control port.
+const LAUNCH_WAIT: Duration = Duration::from_secs(30);
 
 impl Remote {
     pub fn connect(addr: &str) -> std::io::Result<Self> {
-        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1 };
+        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1, launch: false };
         r.reconnect()?;
         Ok(r)
+    }
+    /// The app at `addr`, reached at the first call instead of now, so an MCP client can start
+    /// the server before the app is open. With `launch`, a call that finds nothing at `addr`
+    /// opens the app with that control port first (macOS) and waits for it.
+    pub fn lazy(addr: &str, launch: bool) -> Self {
+        Self { addr: addr.to_string(), conn: None, next_id: 1, launch }
+    }
+    /// Connect, opening the app first when asked to and nothing answers.
+    fn reach(&mut self) -> std::io::Result<()> {
+        let first = match self.reconnect() {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        if !self.launch || !matches!(first.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut) {
+            return Err(not_open(&self.addr, first));
+        }
+        launch_app(&self.addr)?;
+        let start = std::time::Instant::now();
+        while start.elapsed() < LAUNCH_WAIT {
+            std::thread::sleep(Duration::from_millis(500));
+            if self.reconnect().is_ok() {
+                return Ok(());
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "CADCraft was opened but its control port {} did not answer; if it was already open without the port, quit it and try again",
+                self.addr
+            ),
+        ))
     }
     fn reconnect(&mut self) -> std::io::Result<()> {
         self.conn = None;
@@ -49,7 +85,7 @@ impl Remote {
     /// On failure the flag says whether the request may already have reached the server.
     fn roundtrip(&mut self, line: &str) -> Result<String, (std::io::Error, bool)> {
         if self.conn.is_none() {
-            self.reconnect().map_err(|e| (e, false))?;
+            self.reach().map_err(|e| (e, false))?;
         }
         let Some((reader, writer)) = self.conn.as_mut() else { return Err((std::io::Error::other("not connected"), false)) };
         let sent = writer.write_all(line.as_bytes()).and_then(|()| writer.write_all(b"\n")).and_then(|()| writer.flush());
@@ -72,9 +108,54 @@ impl Remote {
     }
 }
 
+/// The `window` of a `ui.render` request: two finite corners [[x0, y0], [x1, y1]] around an area
+/// (`None` when absent or unusable).
+fn render_window(p: &Value) -> Option<cadcraft_engine::geom::Bounds2> {
+    let a = p.get("window")?.as_array().filter(|a| a.len() == 2)?;
+    let pt = |v: &Value| -> Option<cadcraft_engine::geom::Vec2> {
+        let c = v.as_array().filter(|c| c.len() == 2)?;
+        let (x, y) = (c[0].as_f64()?, c[1].as_f64()?);
+        (x.is_finite() && y.is_finite()).then(|| cadcraft_engine::geom::Vec2::new(x, y))
+    };
+    let b = cadcraft_engine::geom::Bounds2::new(pt(&a[0])?, pt(&a[1])?);
+    (b.width() > 0.0 && b.height() > 0.0).then_some(b)
+}
+
+/// The error for an app that doesn't answer: what to do about it.
+fn not_open(addr: &str, e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        format!(
+            "CADCraft is not answering at {addr} ({e}). Open CADCraft with its control port (`--control PORT` or CADCRAFT_CONTROL_PORT), then try again"
+        ),
+    )
+}
+
+/// Open the app with the control port of `addr` (macOS: `open -a CADCraft`).
+fn launch_app(addr: &str) -> std::io::Result<()> {
+    let port = addr.rsplit(':').next().filter(|p| p.parse::<u16>().is_ok()).ok_or_else(|| std::io::Error::other(format!("no port in {addr}")))?;
+    if cfg!(target_os = "macos") {
+        let ok = std::process::Command::new("open").args(["-a", "CADCraft", "--args", "--control", port]).status()?.success();
+        if ok { Ok(()) } else { Err(std::io::Error::other("could not open CADCraft (is it in Applications?)")) }
+    } else {
+        Err(std::io::Error::other(format!("CADCraft is not running; start it with `cadcraft --control {port}`")))
+    }
+}
+
 /// Methods that only read state, so resending them after a lost reply cannot change the drawing twice.
 fn is_read_only(method: &str) -> bool {
-    matches!(method, "drawing.inspect" | "document.inspect" | "engine.commands" | "cmdline.state" | "ui.inspect" | "ui.render" | "ui.screenshot")
+    matches!(
+        method,
+        "drawing.inspect"
+            | "document.inspect"
+            | "engine.commands"
+            | "cmdline.state"
+            | "control.methods"
+            | "ping"
+            | "ui.inspect"
+            | "ui.render"
+            | "ui.screenshot"
+    )
 }
 
 impl Backend for Remote {
@@ -114,6 +195,23 @@ impl Backend for Remote {
         format!("connected to CADCraft at {}", self.addr)
     }
 }
+
+/// What the headless `control.methods` replies: the methods [`Headless`] answers, a subset of the
+/// app's (`docs/control-protocol.md`).
+const HEADLESS_METHODS: &[(&str, &str, &str)] = &[
+    ("cmdline.input", "{text}", "Type a line at the command line exactly like a user (commands, prompts, keywords; empty = Enter)."),
+    ("cmdline.script", "{text}", "Run a multi-line script, like a .scr file."),
+    ("cmdline.key", "{key: \"enter\"|\"escape\"}", "Press Enter or Escape at the command line."),
+    ("cmdline.state", "", "Current prompt, keywords, accepted input kinds and history tail."),
+    ("engine.execute", "{command, params}", "Run any command with JSON parameters. Never opens a dialog."),
+    ("engine.commands", "", "Every command: id, label, menu path, shortcut, aliases, params doc, enabled."),
+    ("drawing.inspect", "{entities?, limit?}", "Drawing summary and entities with handles and geometry."),
+    ("ui.render", "{path?, width?, height?, fit?}", "Render the drawing; replies pngBase64."),
+    ("app.open", "{path}", "Open a drawing."),
+    ("app.save", "{path?}", "Save the drawing (Save As with a path)."),
+    ("control.methods", "", "This list."),
+    ("ping", "", "Replies \"pong\"."),
+];
 
 /// An in-process headless session (no window).
 pub struct Headless {
@@ -207,14 +305,20 @@ impl Backend for Headless {
                 let w = p.get("width").and_then(Value::as_f64).unwrap_or(1600.0).clamp(16.0, 8192.0) as u32;
                 let h = p.get("height").and_then(Value::as_f64).unwrap_or(1000.0).clamp(16.0, 8192.0) as u32;
                 let st = s.state().map_err(|e| e.to_string())?;
-                let list = cadcraft_render::build(&st.doc, &st.space, &cadcraft_render::Options::default());
+                let window = render_window(&p);
+                let opts = cadcraft_render::Options { view: window, transparency: s.settings.transparency_display, ..Default::default() };
+                let list = cadcraft_render::build(&st.doc, &st.space, &opts);
                 let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(true);
-                let view = if fit {
+                let side = |k: &str| p.get(k).and_then(Value::as_f64).map(|x| x as u32);
+                let view = if let Some(win) = &window {
+                    cadcraft_render::raster::View::of_window(win, side("width"), side("height"))
+                } else if fit {
                     cadcraft_render::raster::View::fit(&list.bounds, w, h, 0.05)
                 } else {
                     let v = st.view();
                     cadcraft_render::raster::View { center: v.center, scale: f64::from(h) / v.height.max(1e-12), width: w, height: h }
                 };
+                let (w, h) = (view.width, view.height);
                 let png =
                     cadcraft_render::raster::render_png(&list, &view, &cadcraft_render::raster::RasterOptions::default()).ok_or("render failed")?;
                 if let Some(path) = str_p("path") {
@@ -231,7 +335,12 @@ impl Backend for Headless {
                 s.execute(id, &p).map_err(|e| e.to_string())
             }
             "ui.screenshot" => Err("no UI in headless mode; use render".into()),
-            other => Err(format!("unknown method `{other}`")),
+            "control.methods" => Ok(HEADLESS_METHODS
+                .iter()
+                .map(|(method, params, description)| json!({"method": method, "params": params, "description": description}))
+                .collect()),
+            "ping" => Ok(json!("pong")),
+            other => Err(format!("unknown method `{other}`; `control.methods` lists them (docs/control-protocol.md)")),
         }
     }
     fn has_ui(&self) -> bool {

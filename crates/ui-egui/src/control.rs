@@ -18,6 +18,7 @@
 //! - `ui.screenshot {path?}`: PNG of the window; `ui.render {path?, width?, height?, fit?}`: headless
 //!   render of the drawing (no window needed; fits the drawing unless `fit` is false; replies `pngBase64`)
 //! - `app.open {path}`, `app.save {path?}`, `app.quit`
+//! - `control.methods`: this list, with params and a description; `ping`: replies `"pong"`
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -185,6 +186,42 @@ fn wrap(r: Result<Value, String>) -> Outcome {
     }
 }
 
+/// What `control.methods` replies: method, params, description. Keep in step with `handle` and the
+/// table in `docs/control-protocol.md` (`tests/control_methods.rs` checks the table).
+const METHODS: &[(&str, &str, &str)] = &[
+    ("cmdline.input", "{text}", "Type a line at the command line exactly like a user (commands, prompts, keywords; empty = Enter)."),
+    ("cmdline.script", "{text}", "Run a multi-line script, like a .scr file."),
+    ("cmdline.key", "{key: \"enter\"|\"escape\"}", "Press Enter or Escape at the command line."),
+    ("cmdline.state", "", "Current prompt, keywords, accepted input kinds and history tail."),
+    ("engine.execute", "{command, params}", "Run any command with JSON parameters. Never opens a dialog."),
+    ("engine.commands", "", "Every command: id, label, menu path, shortcut, aliases, params doc, enabled."),
+    ("drawing.inspect", "{entities?, limit?}", "Drawing summary and entities with handles and geometry."),
+    ("ui.inspect", "", "UI state, canvas rect, view, cursor and snap, performance, keyboard focus."),
+    ("ui.elements", "{label?, role?, focused?}", "Observed visible controls with their egui id, rectangle, state and focus."),
+    ("ui.menu.list", "", "The menu tree."),
+    ("ui.menu.invoke", "{command}", "Invoke a menu item like a click (interactive)."),
+    ("ui.pointer", "{x, y, space?, button?, action?}", "Click or move in the drawing area (world coordinates by default). Right button = Enter."),
+    ("ui.click", "{x, y, button?, shift?, ctrl?}", "Real egui click in screen points."),
+    ("ui.move", "{x, y}", "Real egui pointer move in screen points."),
+    ("ui.drag", "{x, y, to: [x, y], button?}", "Real press, move and release."),
+    ("ui.key", "{key, cmd?, shift?, alt?}", "Synthetic key press."),
+    ("ui.text", "{text}", "Synthetic text input."),
+    ("ui.set", "UiState fields", "Change UI state: palettes, toolbars, command line, theme…"),
+    ("ui.resize", "{width, height}", "Resize the window."),
+    ("ui.focus", "", "Activate the native window."),
+    ("ui.screenshot", "{path?}", "PNG of the window (needs a presented frame)."),
+    ("ui.render", "{path?, width?, height?, fit?}", "Headless render of the drawing; replies pngBase64."),
+    ("app.open", "{path}", "Open a drawing."),
+    ("app.save", "{path?}", "Save the drawing (Save As with a path)."),
+    ("app.quit", "", "Quit without the unsaved-changes prompt."),
+    ("control.methods", "", "This list."),
+    ("ping", "", "Replies \"pong\"."),
+];
+
+fn methods_json() -> Value {
+    METHODS.iter().map(|(method, params, description)| json!({"method": method, "params": params, "description": description})).collect()
+}
+
 pub fn all_commands(app: &CadApp) -> Value {
     let mut v: Vec<Value> = cadcraft_engine::command_specs().iter().map(|c| serde_json::to_value(c.info(&app.session)).unwrap_or_default()).collect();
     for (id, label, menu, sc) in crate::menus::UI_COMMANDS {
@@ -221,6 +258,7 @@ pub fn inspect(app: &CadApp, ctx: &egui::Context) -> Value {
     json!({
         "ui": serde_json::to_value(&app.ui).unwrap_or_default(),
         "theme": if app.shown_theme() == egui::Theme::Light { "light" } else { "dark" },
+        "animations": app.shows_animations(),
         "focus": focus_json(ctx),
         "canvasRect": app.canvas.rect.map(|c| json!([c.left(), c.top(), c.width(), c.height()])),
         "window": [r.width(), r.height()],
@@ -336,7 +374,7 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
             }
             let r = match s("button").unwrap_or("left") {
                 "right" => app.session.input(Input::Enter),
-                _ if app.session.running.is_some() => app.session.input(Input::Point(wp)),
+                _ if app.session.prompting() => app.session.input(Input::Point(wp)),
                 _ => app.session.idle_click(wp, p.get("shift").and_then(Value::as_bool).unwrap_or(false)),
             };
             match r {
@@ -433,10 +471,17 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
             let w = f("width").unwrap_or(1600.0).clamp(16.0, 8192.0) as u32;
             let h = f("height").unwrap_or(1000.0).clamp(16.0, 8192.0) as u32;
             let Ok(st) = app.session.state() else { return err("no drawing") };
-            let list = cadcraft_render::build(&st.doc, &st.space, &cadcraft_render::Options::default());
+            // `window`: just that area, at the size given or matching its shape.
+            let window = render_window(p);
+            let opts = cadcraft_render::Options { view: window, transparency: app.session.settings.transparency_display, ..Default::default() };
+            let list = cadcraft_render::build(&st.doc, &st.space, &opts);
             let v = st.view();
             let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(true);
-            let view = render_view(&list.bounds, v.center, v.height, fit, w, h);
+            let view = match &window {
+                Some(win) => cadcraft_render::raster::View::of_window(win, f("width").map(|x| x as u32), f("height").map(|x| x as u32)),
+                None => render_view(&list.bounds, v.center, v.height, fit, w, h),
+            };
+            let (w, h) = (view.width, view.height);
             let Some(png) = cadcraft_render::raster::render_png(&list, &view, &cadcraft_render::raster::RasterOptions::default()) else {
                 return err("render failed");
             };
@@ -461,8 +506,23 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             ok(Value::Null)
         }
-        other => err(format!("unknown method `{other}`")),
+        "control.methods" => ok(methods_json()),
+        "ping" => ok(json!("pong")),
+        other => err(format!("unknown method `{other}`; `control.methods` lists them (docs/control-protocol.md)")),
     }
+}
+
+/// The `window` of a `ui.render` request: two finite corners [[x0, y0], [x1, y1]] around an area
+/// (`None` when absent or unusable).
+pub fn render_window(p: &Value) -> Option<cadcraft_geom::Bounds2> {
+    let a = p.get("window")?.as_array().filter(|a| a.len() == 2)?;
+    let pt = |v: &Value| -> Option<cadcraft_geom::Vec2> {
+        let c = v.as_array().filter(|c| c.len() == 2)?;
+        let (x, y) = (c[0].as_f64()?, c[1].as_f64()?);
+        (x.is_finite() && y.is_finite()).then(|| cadcraft_geom::Vec2::new(x, y))
+    };
+    let b = cadcraft_geom::Bounds2::new(pt(&a[0])?, pt(&a[1])?);
+    (b.width() > 0.0 && b.height() > 0.0).then_some(b)
 }
 
 /// The raster view for `ui.render`: fitted to the drawing's bounds, or the current screen view.

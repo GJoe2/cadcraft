@@ -34,12 +34,25 @@ const SESSION_VARS: &[&str] = &[
     "DYNPICOORDS",
     "DYNPROMPT",
     "LWDISPLAY",
+    "PLOTTRANSPARENCYOVERRIDE",
     "SELECTSIMILARMODE",
     "OBJECTISOLATIONMODE",
     "QPMODE",
+    "HIGHLIGHT",
+    "SELECTIONEFFECT",
+    "SELECTIONPREVIEW",
+    "PREVIEWEFFECT",
+    "PREVIEWFILTER",
+    "GRIPS",
+    "GRIPOBJLIMIT",
+    "SELECTIONAREA",
+    "WINDOWAREACOLOR",
+    "CROSSINGAREACOLOR",
+    "SELECTIONAREAOPACITY",
     "PICKBOX",
     "APERTURE",
     "PICKFIRST",
+    "ACADLSPASDOC",
     "PICKADD",
     "PICKSTYLE",
     "GRIPSIZE",
@@ -88,13 +101,26 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         "DYNPICOORDS" => json!(i32::from(st.dynpi_absolute)),
         "DYNPROMPT" => json!(i32::from(st.dynprompt)),
         "LWDISPLAY" => json!(i32::from(st.lwdisplay)),
+        "PLOTTRANSPARENCYOVERRIDE" => json!(st.plot_transparency_override),
         "SELECTSIMILARMODE" => json!(st.selectsimilarmode),
         // Isolation is temporary: hidden objects show again when the drawing is reopened.
         "OBJECTISOLATIONMODE" => json!(0),
         "QPMODE" => json!(i32::from(st.qpmode)),
+        "HIGHLIGHT" => json!(i32::from(st.highlight)),
+        "SELECTIONEFFECT" => json!(st.selectioneffect),
+        "SELECTIONPREVIEW" => json!(st.selectionpreview),
+        "PREVIEWEFFECT" => json!(st.previeweffect),
+        "PREVIEWFILTER" => json!(st.previewfilter),
+        "GRIPS" => json!(st.grips),
+        "GRIPOBJLIMIT" => json!(st.gripobjlimit),
+        "SELECTIONAREA" => json!(i32::from(st.selectionarea)),
+        "WINDOWAREACOLOR" => json!(st.windowareacolor),
+        "CROSSINGAREACOLOR" => json!(st.crossingareacolor),
+        "SELECTIONAREAOPACITY" => json!(st.selectionareaopacity),
         "PICKBOX" => json!(st.pickbox),
         "APERTURE" => json!(st.aperture),
         "PICKFIRST" => json!(i32::from(st.pickfirst)),
+        "ACADLSPASDOC" => json!(i32::from(st.acadlspasdoc)),
         "PICKADD" => json!(i32::from(st.pickadd)),
         "PICKSTYLE" => json!(st.pickstyle),
         "GRIPSIZE" => json!(st.gripsize),
@@ -114,16 +140,10 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         "CMDNAMES" => json!(s.running.as_ref().map(|r| r.id.to_ascii_uppercase()).unwrap_or_default()),
         "DWGNAME" => json!(s.state().map(|d| d.title.clone()).unwrap_or_default()),
         "DBMOD" => json!(s.state().map(|d| i32::from(d.is_dirty())).unwrap_or(0)),
+        "BLOCKEDITOR" => json!(i32::from(s.state().is_ok_and(|d| d.block_edit.is_some()))),
         // The template NEW/QNEW start from (a profile setting, like FONTALT; "" = none).
         "QNEWTEMPLATE" => json!(crate::cmd::file::qnew_template()),
-        "CTAB" => json!(
-            s.state()
-                .map(|d| match &d.space {
-                    cadcraft_doc::Space::Model => "Model".to_string(),
-                    cadcraft_doc::Space::Paper(n) => n.clone(),
-                })
-                .unwrap_or_default()
-        ),
+        "CTAB" => json!(s.state().map(|d| d.space.tab_name().to_string()).unwrap_or_default()),
         // UNDO state of the drawing: Control/Auto/group bits and the number of marks.
         "UNDOCTL" => json!(s.state().ok()?.undo_ctl.bits()),
         "UNDOMARKS" => json!(s.state().ok()?.undo_marks()),
@@ -164,6 +184,10 @@ fn as_bool(v: &Value) -> Option<bool> {
 fn as_i(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_bool().map(i64::from)).or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
 }
+/// A whole number from 0 to `max` (a mode or a small bitcode).
+fn small(v: &Value, max: u8) -> Option<u8> {
+    as_i(v).filter(|n| (0..=i64::from(max)).contains(n)).and_then(|n| u8::try_from(n).ok())
+}
 fn as_f64(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(crate::units::parse_distance)).filter(|f| f.is_finite())
 }
@@ -172,7 +196,8 @@ fn as_pt(v: &Value) -> Option<cadcraft_geom::Vec2> {
 }
 
 /// Variables `get` reports from session or drawing state that `set` can't change.
-const READ_ONLY: &[&str] = &["CMDNAMES", "DWGNAME", "DBMOD", "CTAB", "LASTPOINT", "VIEWCTR", "VIEWSIZE", "EXTMIN", "EXTMAX", "UNDOCTL", "UNDOMARKS"];
+const READ_ONLY: &[&str] =
+    &["CMDNAMES", "DWGNAME", "DBMOD", "BLOCKEDITOR", "CTAB", "LASTPOINT", "VIEWCTR", "VIEWSIZE", "EXTMIN", "EXTMAX", "UNDOCTL", "UNDOMARKS"];
 
 pub fn is_read_only(name: &str) -> bool {
     READ_ONLY.iter().any(|r| r.eq_ignore_ascii_case(name.trim())) || table::is_read_only(&name.trim().to_ascii_uppercase())
@@ -238,6 +263,9 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
         "DYNPICOORDS" => st.dynpi_absolute = as_bool(v).ok_or_else(bad)?,
         "DYNPROMPT" => st.dynprompt = as_bool(v).ok_or_else(bad)?,
         "LWDISPLAY" => st.lwdisplay = as_bool(v).ok_or_else(bad)?,
+        "PLOTTRANSPARENCYOVERRIDE" => {
+            st.plot_transparency_override = as_i(v).filter(|i| (0..=2).contains(i)).and_then(|i| u8::try_from(i).ok()).ok_or_else(bad)?
+        }
         "SELECTSIMILARMODE" => st.selectsimilarmode = as_i(v).filter(|b| (0..=255).contains(b)).ok_or_else(bad)? as u32,
         "OBJECTISOLATIONMODE" => match as_i(v) {
             Some(0) => {}
@@ -245,9 +273,21 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
             _ => return Err(bad()),
         },
         "QPMODE" => st.qpmode = as_i(v).ok_or_else(bad)? > 0,
+        "HIGHLIGHT" => st.highlight = as_bool(v).ok_or_else(bad)?,
+        "SELECTIONEFFECT" => st.selectioneffect = small(v, 1).ok_or_else(bad)?,
+        "SELECTIONPREVIEW" => st.selectionpreview = small(v, 3).ok_or_else(bad)?,
+        "PREVIEWEFFECT" => st.previeweffect = small(v, 2).ok_or_else(bad)?,
+        "PREVIEWFILTER" => st.previewfilter = small(v, 63).ok_or_else(bad)?,
+        "GRIPS" => st.grips = small(v, 2).ok_or_else(bad)?,
+        "GRIPOBJLIMIT" => st.gripobjlimit = as_i(v).filter(|n| (0..=32_767).contains(n)).and_then(|n| u32::try_from(n).ok()).ok_or_else(bad)?,
+        "SELECTIONAREA" => st.selectionarea = as_bool(v).ok_or_else(bad)?,
+        "WINDOWAREACOLOR" => st.windowareacolor = small(v, 255).filter(|c| *c >= 1).ok_or_else(bad)?,
+        "CROSSINGAREACOLOR" => st.crossingareacolor = small(v, 255).filter(|c| *c >= 1).ok_or_else(bad)?,
+        "SELECTIONAREAOPACITY" => st.selectionareaopacity = small(v, 100).ok_or_else(bad)?,
         "PICKBOX" => st.pickbox = as_f64(v).ok_or_else(bad)?.clamp(0.0, 50.0),
         "APERTURE" => st.aperture = as_f64(v).ok_or_else(bad)?.clamp(1.0, 50.0),
         "PICKFIRST" => st.pickfirst = as_bool(v).ok_or_else(bad)?,
+        "ACADLSPASDOC" => st.acadlspasdoc = as_bool(v).ok_or_else(bad)?,
         "PICKADD" => st.pickadd = as_bool(v).ok_or_else(bad)?,
         "PICKSTYLE" => st.pickstyle = as_i(v).filter(|b| (0..=3).contains(b)).and_then(|b| u8::try_from(b).ok()).ok_or_else(bad)?,
         "GRIPSIZE" => st.gripsize = as_f64(v).ok_or_else(bad)?.clamp(1.0, 255.0),

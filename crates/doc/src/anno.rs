@@ -159,6 +159,9 @@ pub fn anno_scaled(e: &Entity, f: f64) -> Entity {
         EntityKind::MText(t) => {
             t.height *= f;
             t.width *= f;
+            if let Some(c) = &mut t.columns {
+                c.scale(f);
+            }
         }
         EntityKind::Dimension(dm) => {
             dm.overrides.insert("scale".into(), serde_json::json!(f));
@@ -172,6 +175,9 @@ pub fn anno_scaled(e: &Entity, f: f64) -> Entity {
                 t.insert = land + (t.insert - land) * f;
                 t.height *= f;
                 t.width *= f;
+                if let Some(c) = &mut t.columns {
+                    c.scale(f);
+                }
             }
             if let Some(ins) = &mut m.block {
                 ins.insert = land + (ins.insert - land) * f;
@@ -188,6 +194,11 @@ pub fn anno_scaled(e: &Entity, f: f64) -> Entity {
                 a.text.insert = o + (a.text.insert - o) * f;
                 a.text.align_pt = a.text.align_pt.map(|p| o + (p - o) * f);
                 a.text.height *= f;
+                if let Some(ml) = &mut a.multiline {
+                    ml.mtext.insert = o + (ml.mtext.insert - o) * f;
+                    ml.mtext.height *= f;
+                    ml.mtext.width *= f;
+                }
             }
         }
         _ => {}

@@ -74,17 +74,17 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("pagesetup", "Page Setup Manager...", run_pagesetup)
             .menu(&["File", "Page Setup Manager..."])
             .params(
-                "{layout?: current, device?: plotter name (PLOTTERMANAGER) | \"None\", paper?: the device's paper | \"A4\"|\"A3\"|\"Letter\"|\"ANSI B\"|…, width?, height? (mm), landscape?, margins?: [l,b,r,t] mm, lineweights?, plotArea?, scale?, scaleToFit?, center?, plotStyleTable?: \"monochrome.ctb\"|\"grayscale.ctb\"|\"default.ctb\"|\"None\"|…, displayPlotStyles?: bool}",
+                "{layout?: current, device?: plotter name (PLOTTERMANAGER) | \"None\", paper?: the device's paper | \"A4\"|\"A3\"|\"Letter\"|\"ANSI B\"|…, width?, height? (mm), landscape?, margins?: [l,b,r,t] mm, lineweights?, plotArea?, scale?, scaleToFit?, center?, plotStyleTable?: \"monochrome.ctb\"|\"grayscale.ctb\"|\"default.ctb\"|\"None\"|…, displayPlotStyles?: bool, plotTransparency?: bool}",
             ),
         CommandSpec::new("plot", "Print...", |s, p| run_plot(s, &super::plotters::plot_options(s, p, "plot")?, "plot"))
             .menu(&["File", "Print..."])
             .key("Cmd+P")
             .alias(&["print"])
-            .params("{path? (else returns base64 `data`), layout?: current|\"Model\", paper?, landscape?, fit?: bool, scale?: number | \"1:50\", lineweights?: bool, plotArea?: extents|display|limits|window (Model) | layout, window?: [[x1,y1],[x2,y2]]} (typed or from the menu: the Plot dialog)")
+            .params("{path? (else returns base64 `data`), layout?: current|\"Model\", paper?, landscape?, fit?: bool, scale?: number | \"1:50\", center?: bool (Model, default true), offset?: [x,y] mm (Model, when center is false; each within ±100000), lineweights?: bool, plotTransparency?: bool (default: the page setup's; PLOTTRANSPARENCYOVERRIDE 0/2 overrides it), plotArea?: extents|display|limits|window (Model) | layout, window?: [[x1,y1],[x2,y2]]} (typed or from the menu: the Plot dialog)")
             .noundo(),
         CommandSpec::new("exportpdf", "Export to PDF...", |s, p| run_plot(s, &super::plotters::plot_options(s, p, "exportpdf")?, "exportpdf"))
             .menu(&["File", "Export to PDF..."])
-            .params("{path? (else returns base64 `data`), layout?, paper?, landscape?, fit?, scale?, lineweights?, plotArea?, window?} (as PLOT)")
+            .params("{path? (else returns base64 `data`), layout?, paper?, landscape?, fit?, scale?, center?: bool (Model, default true), offset?: [x,y] mm (Model, when center is false; each within ±100000), lineweights?, plotTransparency?, plotArea?, window?} (as PLOT)")
             .noundo(),
         CommandSpec::new("mspace", "Model Space (in viewport)", run_mspace)
             .alias(&["ms"])
@@ -262,10 +262,10 @@ fn run_delete(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn run_rename(s: &mut Session, p: &Value) -> Result<Value> {
-    let from = match (str_param(p, "from"), s.layout_space()) {
+    let from = match (str_param(p, "from"), s.layout_space().layout()) {
         (Some(f), _) => f.to_string(),
-        (None, Space::Paper(n)) => n,
-        (None, Space::Model) => return Err(bad("layout.rename", "`from` is required in the Model tab")),
+        (None, Some(n)) => n.to_string(),
+        (None, None) => return Err(bad("layout.rename", "`from` is required in the Model tab")),
     };
     let from = layout_name("layout.rename", s.doc()?, &from)?;
     let to = str_param(p, "to").ok_or_else(|| bad("layout.rename", "`to` is required"))?;
@@ -636,12 +636,12 @@ fn run_pagesetup(s: &mut Session, p: &Value) -> Result<Value> {
         "center",
         "plotStyleTable",
         "displayPlotStyles",
+        "plotTransparency",
     ];
     let changes = keys.iter().any(|k| p.get(k).is_some());
-    let name = match (str_param(p, "layout"), s.space()) {
-        (Some(n), _) => Some(layout_name(cmd, s.doc()?, n)?),
-        (None, Space::Paper(n)) => Some(n),
-        (None, Space::Model) => None,
+    let name = match str_param(p, "layout") {
+        Some(n) => Some(layout_name(cmd, s.doc()?, n)?),
+        None => s.space().layout().map(str::to_string),
     };
     let Some(name) = name else {
         if changes {
@@ -718,6 +718,9 @@ fn run_pagesetup(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(v) = p.get("displayPlotStyles").and_then(Value::as_bool) {
         page.show_plot_styles = v;
     }
+    if let Some(v) = p.get("plotTransparency").and_then(Value::as_bool) {
+        page.plot_transparency = v;
+    }
     if changes {
         if let Some(l) = s.doc_mut()?.layouts.iter_mut().find(|l| l.name == name) {
             l.page = page.clone();
@@ -776,6 +779,28 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
         None => s.space(),
     };
     let mut opts = if p.is_object() { p.clone() } else { json!({}) };
+    if let Some(raw) = p.get("offset") {
+        let values = raw
+            .as_array()
+            .filter(|values| values.len() == 2)
+            .ok_or_else(|| bad(cmd, "`offset` must contain exactly two finite millimetre values within ±100000"))?;
+        let x = values.first().and_then(Value::as_f64);
+        let y = values.get(1).and_then(Value::as_f64);
+        if !x.zip(y).is_some_and(|(x, y)| {
+            x.is_finite()
+                && y.is_finite()
+                && x.abs() <= cadcraft_render::paper::MAX_PLOT_OFFSET_MM
+                && y.abs() <= cadcraft_render::paper::MAX_PLOT_OFFSET_MM
+        }) {
+            return Err(bad(cmd, "`offset` must contain exactly two finite millimetre values within ±100000"));
+        }
+    }
+    if matches!(space, Space::Model)
+        && opts.get("output").and_then(Value::as_str).is_some_and(|output| output.eq_ignore_ascii_case("svg"))
+        && opts.get("center").and_then(Value::as_bool) == Some(false)
+    {
+        return Err(bad(cmd, "model-space plot offsets are not supported for SVG; choose PDF/PNG or center the plot"));
+    }
     if let Some(o) = opts.as_object_mut() {
         if let Some(v) = p.get("scale") {
             let k = parse_scale(v).ok_or_else(|| bad(cmd, "`scale` must be positive: paper units per drawing unit, or a ratio such as \"1:50\""))?;
@@ -784,12 +809,16 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
         if let Some(w) = plot_window(s, p, cmd, &space)? {
             o.insert("window".into(), json!([[w.min.x, w.min.y], [w.max.x, w.max.y]]));
         }
+        // Without one, the plotter uses each sheet's page setup.
+        match super::plotters::plot_transparency(s, p) {
+            Some(t) => o.insert("plotTransparency".into(), json!(t)),
+            None => o.remove("plotTransparency"),
+        };
     }
     let bytes = hook(s.doc()?, &space, &opts).map_err(|e| bad(cmd, e))?;
-    let layout = match (&sheets, &space) {
-        (Some(names), _) => names.first().cloned().unwrap_or_default(),
-        (None, Space::Model) => "Model".to_string(),
-        (None, Space::Paper(n)) => n.clone(),
+    let layout = match &sheets {
+        Some(names) => names.first().cloned().unwrap_or_default(),
+        None => space.tab_name().to_string(),
     };
     let pages = sheets.as_ref().map_or(1, Vec::len);
     match str_param(p, "path") {
@@ -1057,12 +1086,20 @@ mod tests {
         assert!(text.starts_with("%PDF") && text.contains("Paper(\"Layout1\")") && text.contains("A4"));
         let r = s.execute("exportpdf", &json!({})).unwrap();
         assert_eq!(r["layout"], "Model");
+        let baseline = String::from_utf8(super::super::file::base64_decode(r["data"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(!baseline.contains("\"center\"") && !baseline.contains("\"offset\""), "omitted options remain omitted: {baseline}");
         assert!(s.execute("plot", &json!({"layout": "Nope"})).is_err());
         // Plot area and a ratio scale reach the plotter as a model-space window and a number.
         let opts = |r: Value| String::from_utf8(super::super::file::base64_decode(r["data"].as_str().unwrap()).unwrap()).unwrap();
         let p = json!({"layout": "Model", "plotArea": "window", "window": [[10, 0], [0, 5]], "fit": false, "scale": "1:2"});
         let text = opts(s.execute("plot", &p).unwrap());
         assert!(text.contains(r#""window":[[0.0,0.0],[10.0,5.0]]"#) && text.contains(r#""scale":0.5"#), "{text}");
+        let text = opts(s.execute("plot", &json!({"layout": "Model", "center": false, "offset": [12.5, -7.0]})).unwrap());
+        assert!(text.contains(r#""center":false"#) && text.contains(r#""offset":[12.5,-7.0]"#), "{text}");
+        for offset in [json!([1]), json!([1, 2, 3]), json!([f64::NAN, 0]), json!([100_001, 0])] {
+            assert!(s.execute("plot", &json!({"layout": "Model", "center": false, "offset": offset})).is_err());
+        }
+        assert!(s.execute("plot", &json!({"layout": "Model", "output": "svg", "center": false, "offset": [0, 0]})).is_err());
         assert!(opts(s.execute("plot", &json!({"layout": "Model", "plotArea": "limits"})).unwrap()).contains(r#""window":[[0.0,0.0],"#));
         assert!(s.execute("plot", &json!({"layout": "Model", "plotArea": "window"})).is_err(), "window needs corners");
         assert!(s.execute("plot", &json!({"layout": "Layout1", "plotArea": "display"})).is_err(), "layouts plot their sheet");

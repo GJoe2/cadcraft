@@ -796,6 +796,11 @@
 	Select first object	Vyberte první objekt
 	Select first object or	Vyberte první objekt nebo
 	Select first point	Vyberte první bod
+	Add to Working Set	Přidat do pracovní sady
+	Edit Reference In-Place	Upravit referenci na místě
+	Save Reference Edits	Uložit úpravy reference
+	Working Set	Pracovní sada
+	Xref and Block In-place Editing	Úpravy xref a bloků na místě
 	Select nested objects to copy or	Vyberte vnořené objekty ke kopírování nebo
 	Select object	Vyberte objekt
 	Select object to dimension	Vyberte objekt ke kótování
@@ -1172,6 +1177,8 @@
 	Hide Others	Skrýt ostatní
 	Accessibility	Zpřístupnění
 	Show System Cursor	Zobrazit systémový kurzor
+	Animation Effects	Efekty animace
+	Animation effects	Efekty animace
 	Import...	Importovat...
 	Export...	Exportovat...
 	Batch Publish...	Dávkově publikovat...
@@ -1208,3 +1215,5 @@ menu	Dimension	Kótování
 menu	Modify	Modifikace
 	Hatch Pattern	Vzor šrafy
 	Search for pattern	Hledat vzor
+	Not a number or distance: {text}	Není číslo ani vzdálenost: {text}
+	Query Texts	Dotaz na texty

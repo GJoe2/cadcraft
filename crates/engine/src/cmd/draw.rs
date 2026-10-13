@@ -271,7 +271,7 @@ fn run_spline(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Spline::fit_with(&f, bool_or(p, "closed", false), super::spline_opts::json_options(s, p)?)
     } else if let Some(c) = points_param(p, "control") {
-        if c.len() < 2 {
+        if c.len() < 2 || c.len() > super::curves::MAX_GEN {
             return Err(bad("spline", "need 2+ control points"));
         }
         // Degree 1..=10 as at the Degree prompt, `spline.cv` and DXF input (tessellation grows
@@ -378,7 +378,7 @@ fn run_mtext(s: &mut Session, p: &Value) -> Result<Value> {
         attach,
         rotation: f64_or(p, "rotation", 0.0).to_radians(),
         style,
-        contents: super::mtext_opts::json_paragraphs(p, text.replace('\n', "\\P"))?,
+        contents: super::mtext_opts::json_paragraphs(p, text.replace('\n', "\\P"), height)?,
         line_spacing: f64_or(p, "lineSpacing", 1.0),
         line_spacing_exact: bool_or(p, "lineSpacingExact", false),
         columns: super::mtext_opts::json_columns(p, height, width)?,
@@ -428,7 +428,21 @@ impl Interactive for LineM {
             && let Some(first) = self.first
         {
             match i {
-                Input::Point(p) => return self.resolve_first(s, first, snap::LineEnd::Point(p)),
+                Input::Point(p) => {
+                    // A deferred TAN first point with a typed `@d<a` next point: resolve
+                    // exactly from the direction and distance the user gave.
+                    if let Some((dist, ang)) = s.last_polar.take()
+                        && let Some(t) = snap::tangent_point_in_direction(&first.curve, ang, first.at)
+                    {
+                        let e = t + Vec2::new(ang.cos(), ang.sin()) * dist;
+                        self.handles.push(s.add_entity(line(t, e))?);
+                        self.pts = vec![t, e];
+                        s.last_point = e;
+                        self.first = None;
+                        return Ok(Step::Continue);
+                    }
+                    return self.resolve_first(s, first, snap::LineEnd::Point(p));
+                }
                 Input::Deferred(d) => return self.resolve_first(s, first, snap::LineEnd::Deferred(d)),
                 _ => {}
             }
@@ -780,6 +794,9 @@ impl Interactive for CircleM {
                 Ok(Step::Continue)
             }
             Input::Point(p) => {
+                if self.mode == 0 && self.pts.first().is_some_and(|c| c.near(p, 1e-12)) {
+                    return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
+                }
                 self.pts.push(p);
                 let done = match self.mode {
                     0 if self.pts.len() == 2 => {
@@ -895,6 +912,9 @@ impl Interactive for PolygonM {
         let n = self.sides.unwrap_or(4);
         if self.edge {
             if let Input::Point(p) = i {
+                if self.edge_pts.first().is_some_and(|a| a.near(p, 1e-12)) {
+                    return Err(crate::EngineError::Other("Edge endpoints must differ.".into()));
+                }
                 self.edge_pts.push(p);
                 if self.edge_pts.len() == 2 {
                     s.add_entity(lwpoly(polygon_from_edge(self.edge_pts[0], self.edge_pts[1], n), true))?;
@@ -917,11 +937,17 @@ impl Interactive for PolygonM {
                 s.last_used.polygon_circumscribed = !ins;
             }
             (Some(c), Some(ins), Input::Point(p)) => {
+                if c.near(p, 1e-12) {
+                    return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
+                }
                 s.add_entity(lwpoly(polygon_vertices(c, n, p, ins), true))?;
                 return Ok(Step::Done);
             }
             (Some(c), Some(ins), Input::Text(t)) => {
                 let r = number(&t).ok_or_else(|| crate::EngineError::Other("Requires numeric distance or point.".into()))?;
+                if !r.is_finite() || r <= 0.0 {
+                    return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
+                }
                 let rp = polygon_typed_radius_point(c, n, r, ins);
                 s.add_entity(lwpoly(polygon_vertices(c, n, rp, ins), true))?;
                 return Ok(Step::Done);
@@ -1412,11 +1438,22 @@ struct TextM {
     justify: (HAlign, VAlign),
     asking_justify: bool,
     line: usize,
+    /// Run by a LISP routine (`command`): one line of text ends the command, as AutoLISP's
+    /// `command` runs TEXT; typed and in scripts each line asks for the next.
+    single_line: bool,
 }
 
 impl TextM {
-    fn new(_s: &Session) -> Self {
-        TextM { at: None, height: None, rotation: None, justify: (HAlign::Left, VAlign::Baseline), asking_justify: false, line: 0 }
+    fn new(s: &Session) -> Self {
+        TextM {
+            at: None,
+            height: None,
+            rotation: None,
+            justify: (HAlign::Left, VAlign::Baseline),
+            asking_justify: false,
+            line: 0,
+            single_line: s.lisp_running(),
+        }
     }
 }
 
@@ -1477,6 +1514,9 @@ impl Interactive for TextM {
                 let k = make_text(s, at, &t, h, r, self.justify);
                 s.add_entity(k)?;
                 self.line += 1;
+                if self.single_line {
+                    return Ok(Step::Done);
+                }
             }
             (Some(_), Some(_), Some(_), Input::Enter) => return Ok(Step::Done),
             _ => {}
@@ -1561,6 +1601,10 @@ impl Interactive for MTextM {
             _ => {}
         }
         Ok(Step::Continue)
+    }
+    fn editing_mtext(&self) -> Option<MText> {
+        let a = self.first?;
+        (self.boxed() && self.ask.is_none()).then(|| self.opts.mtext(a, self.second, String::new()))
     }
     fn preview(&self, _s: &Session, c: Vec2) -> Vec<EntityKind> {
         match (self.first, self.boxed(), self.ask) {

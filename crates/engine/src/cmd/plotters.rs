@@ -286,9 +286,9 @@ pub(crate) fn plot_options(s: &Session, p: &Value, cmd: &str) -> Result<Value> {
     let layout = match str_param(p, "layout") {
         Some(n) if n.eq_ignore_ascii_case("model") => None,
         Some(n) => s.doc()?.layout(n).map(|l| l.page.clone()),
-        None => match s.space() {
-            cadcraft_doc::Space::Paper(n) => s.doc()?.layout(&n).map(|l| l.page.clone()),
-            cadcraft_doc::Space::Model => None,
+        None => match s.space().layout() {
+            Some(n) => s.doc()?.layout(n).map(|l| l.page.clone()),
+            None => None,
         },
     };
     let dev = match given {
@@ -324,6 +324,16 @@ pub(crate) fn plot_options(s: &Session, p: &Value, cmd: &str) -> Result<Value> {
         }
     }
     Ok(out)
+}
+
+/// Whether a plot draws transparency, as PLOTTRANSPARENCYOVERRIDE decides: 0 never, 2 always,
+/// otherwise the plot's `plotTransparency` (`None` when it has none: the page setup decides).
+pub(crate) fn plot_transparency(s: &Session, p: &Value) -> Option<bool> {
+    match s.settings.plot_transparency_override {
+        0 => Some(false),
+        2 => Some(true),
+        _ => p.get("plotTransparency").and_then(Value::as_bool),
+    }
 }
 
 // ---------- PLOTWINDOW ----------

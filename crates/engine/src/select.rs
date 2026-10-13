@@ -88,13 +88,57 @@ fn dist_to_polyline(pts: &[Vec2], p: Vec2) -> f64 {
 pub fn entity_distance(d: &Drawing, e: &Entity, p: Vec2, tol: f64) -> f64 {
     let polys = hit_polylines(d, e, tol);
     let mut best = polys.iter().map(|pl| dist_to_polyline(pl, p)).fold(f64::INFINITY, f64::min);
-    let filled = matches!(e.kind, EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::AttDef(_) | EntityKind::Solid(_) | EntityKind::Table(_))
-        || matches!(e.kind, EntityKind::Tolerance(_))
-        || matches!(&e.kind, EntityKind::Hatch(h) if h.solid);
-    if filled && entity_bounds(d, e, 0).contains(p) {
+    let filled = matches!(e.kind, EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::AttDef(_) | EntityKind::Table(_))
+        || matches!(e.kind, EntityKind::Tolerance(_));
+    if (filled && entity_bounds(d, e, 0).contains(p)) || in_text(d, e, p) {
+        best = 0.0;
+    }
+    // A solid hatch fills its loops with odd parity under its island style, as it is drawn, not
+    // its bounding rectangle.
+    if let EntityKind::Hatch(h) = &e.kind
+        && h.solid
+        && cadcraft_render::hatch_fill_loops(h, tol).iter().filter(|l| point_in_polygon(l, p)).count() % 2 == 1
+    {
+        best = 0.0;
+    }
+    // A SOLID fills its polygon, not its bounding rectangle (half of which is empty for a triangle).
+    if matches!(e.kind, EntityKind::Solid(_)) && e.kind.prims().iter().any(|prim| matches!(prim, Prim::Fill(poly) if point_in_polygon(poly, p))) {
         best = 0.0;
     }
     best
+}
+
+/// Whether `p` is on the text of a dimension or multileader: inside the box around its words,
+/// turned with the text, as plain text is hit anywhere inside its box. Their other geometry is
+/// hit along its lines, so without this the cursor found the object only between the letters'
+/// edges and the lines.
+fn in_text(d: &Drawing, e: &Entity, p: Vec2) -> bool {
+    match &e.kind {
+        // A dimension with a block (as AutoCAD saves them) is drawn from that block: its text is
+        // the text there, not the text the dimension's own geometry would place.
+        EntityKind::Dimension(dm) => match dm.block.as_ref().and_then(|n| d.block(n)) {
+            Some(blk) => blk.entities.iter().any(|be| match &be.kind {
+                EntityKind::MText(t) => in_box(cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten(), t.rotation, p),
+                EntityKind::Text(_) => entity_bounds(d, be, 0).contains(p),
+                _ => false,
+            }),
+            None => {
+                let g = cadcraft_render::dimension_in(d, dm);
+                in_box(g.text.iter().flatten().chain(g.text_glyphs.iter().flatten().flatten()).copied(), g.text_angle, p)
+            }
+        },
+        EntityKind::MLeader(m) => {
+            m.text.as_ref().is_some_and(|t| in_box(cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten(), t.rotation, p))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `p` is inside the box around `pts` turned by `angle` (the box of text set at `angle`).
+fn in_box(pts: impl Iterator<Item = Vec2>, angle: f64, p: Vec2) -> bool {
+    let turn = |q: Vec2| q.rotate(-angle);
+    let b = Bounds2::from_points(pts.filter(|q| q.is_finite()).map(turn));
+    !b.is_empty() && b.contains(turn(p))
 }
 
 fn selectable(d: &Drawing, e: &Entity) -> bool {
@@ -163,6 +207,18 @@ pub(crate) fn pick_with(d: &Drawing, space: &Space, ix: &Option<std::sync::Arc<S
         }
     }
     best.map(|(_, h)| h)
+}
+
+/// Whether PREVIEWFILTER keeps `e` from being highlighted under the cursor: bits 1 objects on
+/// locked layers, 2 xrefs, 4 tables, 8 multiline text, 16 hatches, 32 objects in groups.
+pub fn preview_filtered(d: &Drawing, e: &Entity, filter: u8) -> bool {
+    let on = |bit: u8| filter & bit != 0;
+    (on(1) && d.layer(&e.common.layer).is_some_and(|l| l.locked))
+        || (on(2) && matches!(&e.kind, EntityKind::Insert(i) if d.block(&i.block).is_some_and(|b| b.xref_path.is_some())))
+        || (on(4) && matches!(e.kind, EntityKind::Table(_)))
+        || (on(8) && matches!(e.kind, EntityKind::MText(_)))
+        || (on(16) && matches!(e.kind, EntityKind::Hatch(_)))
+        || (on(32) && d.groups.iter().any(|g| g.members.contains(&e.handle)))
 }
 
 fn seg_hits_box(a: Vec2, b: Vec2, bx: &Bounds2) -> bool {
@@ -325,7 +381,7 @@ pub enum SelectKind {
 }
 
 /// Most points a fence or polygon collects (typed input is hostile).
-const MAX_MODE_POINTS: usize = 10_000;
+pub(crate) const MAX_MODE_POINTS: usize = 10_000;
 
 /// A typed selection mode in progress and the points given so far.
 #[derive(Clone, Debug, PartialEq)]
@@ -453,6 +509,19 @@ mod solid_interior_tests {
         let inside = Bounds2::new(Vec2::new(3.0, 3.0), Vec2::new(4.0, 4.0));
         assert!(in_window(&d, &e, None, &inside, true, 0.01));
     }
+
+    #[test]
+    fn pick_in_triangular_bbox_but_outside_fill_does_not_select() {
+        let mut d = Drawing::default();
+        d.model.push(face(true, true));
+        let at = |x: f64, y: f64| pick(&d, &Space::Model, Vec2::new(x, y), 0.25);
+        // The empty corner of the bounding rectangle, 5.66 from the hypotenuse.
+        assert_eq!(at(9.0, 9.0), None);
+        // Inside the fill, farther than the aperture from every edge.
+        assert_eq!(at(2.0, 2.0), Some(Handle(256)));
+        // Outside the fill but within the aperture of the hypotenuse.
+        assert_eq!(at(5.1, 5.1), Some(Handle(256)));
+    }
 }
 
 #[cfg(test)]
@@ -502,5 +571,52 @@ mod hatch_pattern_pick_tests {
         let d = ansi31_hatch(vec![square(0.0, 10.0, true), square(4.0, 6.0, false)]);
         assert!(pick(&d, &Space::Model, Vec2::new(1.0, 1.0), 0.05).is_some());
         assert!(pick(&d, &Space::Model, Vec2::new(5.0, 5.0), 0.05).is_none());
+    }
+
+    fn solid_hatch(loops: Vec<HatchLoop>, style: u8) -> Drawing {
+        let mut d = Drawing::new_metric();
+        let hatch = Hatch {
+            pattern: "SOLID".into(),
+            solid: true,
+            loops,
+            scale: 1.0,
+            angle: 0.0,
+            associative: false,
+            style,
+            elevation: 0.0,
+            gradient: None,
+            origin: Vec2::ZERO,
+            background: None,
+            pattern_lines: Vec::new(),
+        };
+        d.add(&Space::Model, Common::default(), EntityKind::Hatch(hatch)).unwrap();
+        d
+    }
+
+    #[test]
+    fn solid_hatch_is_picked_inside_its_fill_not_its_bounding_rectangle() {
+        let tri = HatchLoop {
+            vertices: [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)].iter().map(|&(x, y)| PolyVertex::new(Vec2::new(x, y))).collect(),
+            outer: true,
+            sources: Vec::new(),
+        };
+        let d = solid_hatch(vec![tri], 0);
+        // The empty corner of the bounding rectangle, 5.66 from the hypotenuse.
+        assert!(pick(&d, &Space::Model, Vec2::new(9.0, 9.0), 0.25).is_none());
+        assert!(pick(&d, &Space::Model, Vec2::new(2.0, 2.0), 0.25).is_some());
+        // Outside the fill but within the aperture of the hypotenuse.
+        assert!(pick(&d, &Space::Model, Vec2::new(5.1, 5.1), 0.25).is_some());
+    }
+
+    #[test]
+    fn solid_hatch_island_follows_the_island_style() {
+        let loops = || vec![square(0.0, 10.0, true), square(4.0, 6.0, false)];
+        // Normal style leaves the island empty, as it is drawn.
+        let d = solid_hatch(loops(), 0);
+        assert!(pick(&d, &Space::Model, Vec2::new(5.0, 5.0), 0.05).is_none());
+        assert!(pick(&d, &Space::Model, Vec2::new(2.0, 2.0), 0.05).is_some());
+        // Ignore style fills over the island.
+        let d = solid_hatch(loops(), 2);
+        assert!(pick(&d, &Space::Model, Vec2::new(5.0, 5.0), 0.05).is_some());
     }
 }

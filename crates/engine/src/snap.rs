@@ -8,7 +8,7 @@ mod viewport;
 pub use viewport::ViewportPoint;
 
 use cadcraft_doc::{Drawing, EntityKind, Insert, MAX_BLOCK_DEPTH, Prim, Space};
-use cadcraft_geom::{Bounds2, Circle, Ellipse, Mat3, PI, Segment, Vec2, intersect_ext};
+use cadcraft_geom::{Bounds2, Circle, EPS, Ellipse, Mat3, PI, Segment, Vec2, intersect_ext};
 use serde::Serialize;
 
 /// OSMODE bits.
@@ -94,6 +94,21 @@ pub struct Deferred {
     pub curve: SnapCurve,
     /// Where the curve was picked (the nearest point on it); chooses between solutions.
     pub at: Vec2,
+}
+
+/// The point on `curve` whose tangent has direction `dir`, picking the solution
+/// nearest `hint`. Used to resolve a deferred TAN first point when the next point
+/// is typed as `@distance<angle`.
+pub fn tangent_point_in_direction(curve: &SnapCurve, dir: f64, hint: Vec2) -> Option<Vec2> {
+    match curve {
+        SnapCurve::Circle { center, radius } => {
+            let n = dir + std::f64::consts::FRAC_PI_2;
+            let c1 = *center + Vec2::new(n.cos(), n.sin()) * *radius;
+            let c2 = *center - Vec2::new(n.cos(), n.sin()) * *radius;
+            Some(if c1.dist(hint) < c2.dist(hint) { c1 } else { c2 })
+        }
+        _ => None,
+    }
 }
 
 /// One end of a line being solved: a known point or a deferred snap.
@@ -245,7 +260,14 @@ fn osnap_in_with_prims(
     // meet (lines extended, arcs as full circles: in 2D, the "apparent" crossing of objects
     // that don't reach each other).
     if osmode & (mode::INT | mode::APP) != 0 {
-        let segs: Vec<Vec<Segment>> = near_prims.iter().take(200).map(prim_segments).collect();
+        let mut segs: Vec<Vec<Segment>> = near_prims.iter().take(200).map(prim_segments).collect();
+        let probe = finite_intersection_probe(cursor, aperture);
+        for (i, segments) in segs.iter_mut().enumerate() {
+            let preserves_app = osmode & mode::APP != 0 && near_prims.get(i).is_some_and(extendable);
+            if !preserves_app {
+                segments.retain(|segment| segment_may_intersect_probe(segment, probe.as_ref()));
+            }
+        }
         let real = if osmode & mode::INT != 0 { mode::INT } else { mode::APP };
         for i in 0..segs.len() {
             for j in i + 1..segs.len() {
@@ -272,6 +294,40 @@ fn osnap_in_with_prims(
     }
     let hit = finish(cands, &near_prims, cursor, aperture, osmode, base, deferred, clip);
     Some((hit, near_prims))
+}
+
+fn finite_intersection_probe(cursor: Vec2, aperture: f64) -> Option<Bounds2> {
+    if !(cursor.is_finite() && aperture.is_finite() && aperture > 0.0) {
+        return None;
+    }
+    let probe = Bounds2::new(cursor, cursor).expand(aperture);
+    if !finite_bounds(&probe) {
+        return None;
+    }
+    // The finite line intersection accepts a 1e-9 parameter slack; retain that slack in the broad phase.
+    let scale = cursor.x.abs().max(cursor.y.abs()).max(aperture).max(1.0);
+    let padded = probe.expand(EPS * scale);
+    finite_bounds(&padded).then_some(padded)
+}
+
+fn segment_may_intersect_probe(segment: &Segment, probe: Option<&Bounds2>) -> bool {
+    let Some(probe) = probe else { return true };
+    let bounds = segment.bounds();
+    if !finite_bounds(&bounds) {
+        return true;
+    }
+    let width = bounds.width();
+    let height = bounds.height();
+    if !(width.is_finite() && height.is_finite()) {
+        return true;
+    }
+    let scale = bounds.min.x.abs().max(bounds.min.y.abs()).max(bounds.max.x.abs()).max(bounds.max.y.abs()).max(width).max(height).max(1.0);
+    let padded = bounds.expand(EPS * scale);
+    !finite_bounds(&padded) || padded.intersects(probe)
+}
+
+fn finite_bounds(bounds: &Bounds2) -> bool {
+    !bounds.is_empty() && bounds.min.is_finite() && bounds.max.is_finite()
 }
 
 /// Whether a primitive has a meaningful extension (a line, an arc, a circle, an xline or ray).

@@ -9,7 +9,8 @@
 //! | name | value |
 //! |---|---|
 //! | `theme` | `"system"`, `"light"` or `"dark"` |
-//! | `interfaceLanguage` | `"auto"`, `"en"`, `"uk"`, `"pt-BR"`, `"de"`, `"es"`, `"cs"`, `"ru"`, `"fr"` or `"zh"` |
+//! | `animations` | `"system"`, `"on"` or `"off"`: dialog and menu fades and smoothed scrolling |
+//! | `interfaceLanguage` | `"auto"`, `"en"`, `"uk"`, `"pt-BR"`, `"de"`, `"es"`, `"cs"`, `"ru"`, `"fr"`, `"zh"` or `"it"` |
 //! | `saveFormat` | `"dxf"` or `"dwg"`: the format Save As suggests for new drawings |
 //! | `saveVersion` | `"2000"` … `"2018"`: the version drawings with no file yet are saved in |
 //! | `SAVETIME` | minutes between automatic saves, 0–600 (0: off) |
@@ -18,6 +19,7 @@
 //! | `systemCursor` | keep the system cursor visible over the drawing area |
 //! | `historyLines` | command-line history lines, 0–12 |
 //! | `modelBackground`, `paperBackground` | `"#rrggbb"`, or `null` for the default |
+//! | `selectionColor` | the colour selected objects are highlighted in: `"#rrggbb"`, or `null` for the theme's |
 //! | `snapMarkerSize` | object snap marker size in points, 5–31 |
 //!
 //! SAVETIME and SAVEFILEPATH are the engine's autosave settings, kept with the autosave state
@@ -35,6 +37,7 @@ use egui::Color32;
 use serde_json::{Map, Value, json};
 
 use crate::CadApp;
+use crate::animation::AnimationPref;
 use crate::theme::{self, ThemePref};
 
 /// The host storage key for [`CadApp::profile_json`].
@@ -58,6 +61,8 @@ pub struct UiOptions {
     pub paper_background: Option<Color32>,
     /// Object snap marker size in points.
     pub snap_marker_size: f32,
+    /// The selection highlight colour; `None` keeps the theme's.
+    pub selection_color: Option<Color32>,
     /// While a command runs: a quick right-click is Enter and a held one opens the shortcut menu
     /// (AutoCAD's time-sensitive right-click). Off: a right-click always opens the menu.
     pub time_sensitive_right_click: bool,
@@ -65,14 +70,25 @@ pub struct UiOptions {
 
 impl Default for UiOptions {
     fn default() -> Self {
-        UiOptions { model_background: None, paper_background: None, snap_marker_size: theme::SNAP_MARKER, time_sensitive_right_click: true }
+        UiOptions {
+            model_background: None,
+            paper_background: None,
+            snap_marker_size: theme::SNAP_MARKER,
+            selection_color: None,
+            time_sensitive_right_click: true,
+        }
     }
 }
 
 impl UiOptions {
     /// What the drawing area paints with.
     pub fn canvas(&self) -> theme::Canvas {
-        theme::Canvas { model: self.model_background, paper: self.paper_background, snap_marker: self.snap_marker_size }
+        theme::Canvas {
+            model: self.model_background,
+            paper: self.paper_background,
+            snap_marker: self.snap_marker_size,
+            selection: self.selection_color,
+        }
     }
 }
 
@@ -112,12 +128,14 @@ pub fn route(app: &mut CadApp, id: &str, params: &Value) -> Option<Result<Value,
 #[derive(Default)]
 struct UiChanges {
     theme: Option<ThemePref>,
+    animations: Option<AnimationPref>,
     language: Option<crate::i18n::Preference>,
     save_format: Option<crate::SaveFormat>,
     system_cursor: Option<bool>,
     history_lines: Option<usize>,
     model_background: Option<Option<Color32>>,
     paper_background: Option<Option<Color32>>,
+    selection_color: Option<Option<Color32>>,
     snap_marker_size: Option<f32>,
     save_version: Option<crate::SaveVersion>,
     savetime: Option<u32>,
@@ -137,6 +155,7 @@ fn parse_ui(key: &str, v: &Value, c: &mut UiChanges) -> Result<bool, String> {
     let text = || v.as_str().ok_or_else(|| format!("{key} must be text"));
     match key {
         "theme" => c.theme = Some(ThemePref::parse(text()?).ok_or("theme must be system, light or dark")?),
+        "animations" => c.animations = Some(AnimationPref::parse(text()?).ok_or("animations must be system, on or off")?),
         "interfaceLanguage" => {
             c.language = Some(
                 crate::i18n::Preference::parse(text()?).ok_or_else(|| format!("interfaceLanguage must be {}", crate::i18n::Preference::codes()))?,
@@ -150,6 +169,7 @@ fn parse_ui(key: &str, v: &Value, c: &mut UiChanges) -> Result<bool, String> {
         }
         "modelBackground" => c.model_background = Some(color_param(key, v)?),
         "paperBackground" => c.paper_background = Some(color_param(key, v)?),
+        "selectionColor" => c.selection_color = Some(color_param(key, v)?),
         "snapMarkerSize" => {
             let n = v.as_f64().filter(|n| SNAP_MARKER_SIZES.contains(&(*n as f32)) && n.is_finite()).ok_or("snapMarkerSize must be from 5 to 31")?;
             c.snap_marker_size = Some(n as f32);
@@ -181,12 +201,14 @@ fn ui_json(app: &CadApp) -> Map<String, Value> {
     let o = &app.options;
     let mut m = Map::new();
     m.insert("theme".into(), json!(app.ui.theme.as_str()));
+    m.insert("animations".into(), json!(app.ui.animations.as_str()));
     m.insert("interfaceLanguage".into(), json!(app.ui.interface_language.code()));
     m.insert("saveFormat".into(), json!(app.ui.save_format.as_str()));
     m.insert("systemCursor".into(), json!(app.ui.system_cursor));
     m.insert("historyLines".into(), json!(app.ui.history_lines));
     m.insert("modelBackground".into(), color_json(o.model_background));
     m.insert("paperBackground".into(), color_json(o.paper_background));
+    m.insert("selectionColor".into(), color_json(o.selection_color));
     m.insert("snapMarkerSize".into(), json!(o.snap_marker_size));
     m.insert("saveVersion".into(), json!(app.ui.save_version));
     m.insert("SAVETIME".into(), json!(cadcraft_engine::autosave::savetime()));
@@ -223,6 +245,9 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
     if let Some(t) = ui.theme {
         app.ui.theme = t;
     }
+    if let Some(a) = ui.animations {
+        app.ui.animations = a;
+    }
     if let Some(l) = ui.language {
         app.ui.interface_language = l;
     }
@@ -240,6 +265,9 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
     }
     if let Some(c) = ui.paper_background {
         app.options.paper_background = c;
+    }
+    if let Some(c) = ui.selection_color {
+        app.options.selection_color = c;
     }
     if let Some(n) = ui.snap_marker_size {
         app.options.snap_marker_size = n;
@@ -263,6 +291,7 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
 fn reset_ui(app: &mut CadApp) {
     let d = crate::UiState::default();
     app.ui.theme = d.theme;
+    app.ui.animations = d.animations;
     app.ui.save_format = d.save_format;
     app.ui.save_version = d.save_version;
     app.ui.system_cursor = d.system_cursor;
@@ -282,6 +311,7 @@ impl CadApp {
             "systemCursor": self.ui.system_cursor,
             "modelBackground": color_json(self.options.model_background),
             "paperBackground": color_json(self.options.paper_background),
+            "selectionColor": color_json(self.options.selection_color),
             "snapMarkerSize": self.options.snap_marker_size,
             "timeSensitiveRightClick": self.options.time_sensitive_right_click,
         })
@@ -299,7 +329,7 @@ impl CadApp {
             cadcraft_engine::cmd::options::restore(&mut self.session, vars);
         }
         let mut c = UiChanges::default();
-        for key in ["systemCursor", "modelBackground", "paperBackground", "snapMarkerSize", "timeSensitiveRightClick"] {
+        for key in ["systemCursor", "modelBackground", "paperBackground", "selectionColor", "snapMarkerSize", "timeSensitiveRightClick"] {
             if let Some(value) = v.get(key) {
                 let _ = parse_ui(key, value, &mut c);
             }
@@ -313,6 +343,9 @@ impl CadApp {
         }
         if let Some(bg) = c.paper_background {
             self.options.paper_background = bg;
+        }
+        if let Some(sel) = c.selection_color {
+            self.options.selection_color = sel;
         }
         if let Some(n) = c.snap_marker_size {
             self.options.snap_marker_size = n;

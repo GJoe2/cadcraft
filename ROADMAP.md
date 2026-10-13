@@ -10,7 +10,7 @@ scriptable CLI, a web build, Linux and FreeBSD builds, and a free licence.
 
 **Why pre-alpha:** four of AutoCAD's five core workflows fail the [alpha gate](docs/roadmap.md#alpha-gate).
 Precise drafting lacks object snap tracking and has stubbed TRIM/EXTEND/OFFSET options; blocks
-can't be edited (no block editor, REFEDIT or xrefs); plots ignore plot styles; and a DWG saved by
+can't be edited in a block editor (REFEDIT edits them in place, xrefs not yet); plots ignore plot styles; and a DWG saved by
 CADCraft drops everything it doesn't model and has never been checked in
 AutoCAD. Dimensioning passes. Ready for real work (≈ 38%) is also under the ~40% alpha bar. Beta
 is ≈ 600–930 h away.
@@ -98,7 +98,7 @@ Ukrainian and German. Detail: [localization-parity.md](docs/localization-parity.
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Other languages shipped: Ukrainian and German, both partial (989 catalog rows each; Ukrainian landed with #36; engine messages stay English).
+Other languages shipped: Ukrainian and German (989 catalog rows each; Ukrainian landed with #36), Brazilian Portuguese, Spanish, Czech, Russian, French, Simplified Chinese and Italian (1,227 rows, 2026-10-12); engine messages stay English.
 
 ## Upcoming
 
@@ -118,6 +118,8 @@ Ranked; detail and the full beta checklist in [docs/roadmap.md](docs/roadmap.md)
 
 | Date | Entry |
 |---|---|
+| 2026-10-12 | TRIM: a pick after a closed polyline's last cut keeps only the complementary run instead of an extra circuit of the outline (#726) |
+| 2026-10-12 | HATCHEDIT refuses an explicit bad `scale` or `angle` before it edits anything, so a rejected request leaves the drawing, undo and redo as they were (#724) |
 | 2026-10-10 | Merged main: Ukrainian interface (#36, first string catalog), Dynamic Input pointer boxes with Tab and relative entry (#60), press-drag selection windows (#63), WIPEOUT and hatch gradients kept through DXF/DWG save (#147, #162), SETVAR DIM* as style overrides (#129), UNITS dialog (#38), close-window save prompt (#47), DIMANGULAR on circles (#20), cargo fmt fixed on main. UI/UX 40% → 43% (dynamic input 15% → 45%), localization 3% → 5%; ready for real work ≈ 37% → 38% (weighted 37.2% → 37.7%), mainstream 27% → 28%, essentials 45% → 46%. Beta is now ~37 points away; hours unchanged within rounding. |
 | 2026-10-10 | Added mainstream practitioner (≈ 27%) and essentials user (≈ 45%) numbers; ready for real work unchanged at ≈ 37%. User evidence: 2 praise comments, 0 "switched from AutoCAD" reports, 27 of 37 open issues on the core path. |
 | 2026-10-10 | Stage re-normalized from alpha to **pre-alpha** under the craftrules core-workflow gate: drafting with tracking, blocks, plotting and lossless DWG save fail; dimensioning passes. Alpha is ≈ 125–190 h away. |
@@ -131,6 +133,8 @@ Ranked; detail and the full beta checklist in [docs/roadmap.md](docs/roadmap.md)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | trivial | Progress log: closed-polyline TRIM (#726) |
+| 2026-10-12 | trivial | Progress log: HATCHEDIT numeric validation (#724) |
 | 2026-10-10 | minor | Merged main's changes (Ukrainian catalog, dynamic input pointer boxes, DXF fixes); UI/UX and localization numbers updated |
 | 2026-10-10 | minor | Readiness-by-audience table with hours to ~95% for each number |
 | 2026-10-10 | minor | Mainstream practitioner and essentials user headline numbers |

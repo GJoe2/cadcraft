@@ -39,7 +39,7 @@ fn catalog_is_valid_and_preserves_placeholders_and_ellipses() {
 /// to English for what they don't cover yet; their gaps are reported, not enforced, so adding a
 /// command doesn't require a row in every language.
 const REQUIRED: &[&str] = &["uk"];
-const REPORTED: &[&str] = &["pt-BR", "de", "es", "cs", "ru", "fr", "zh"];
+const REPORTED: &[&str] = &["pt-BR", "de", "es", "cs", "ru", "fr", "zh", "it"];
 
 fn check(language: &str, what: &str, missing: Vec<String>) {
     if REQUIRED.contains(&language) {
@@ -96,8 +96,12 @@ fn missing_marked_ui_literals(language: &str) -> BTreeSet<String> {
         include_str!("../palettes/quickcalc.rs"),
         include_str!("../palettes/patterns.rs"),
         include_str!("../dialogs.rs"),
+        include_str!("../hatchdlg.rs"),
+        include_str!("../mtext_editor.rs"),
         include_str!("../layers.rs"),
         include_str!("../canvas/compare.rs"),
+        include_str!("../canvas/blockedit.rs"),
+        include_str!("../bedit.rs"),
         include_str!("../palettes.rs"),
         include_str!("../parametric.rs"),
         include_str!("../quick.rs"),
@@ -348,6 +352,7 @@ fn dialogs_render_in_ukrainian_and_keep_their_source_ids() {
         ("qselect", "Швидкий вибір"),
         ("parameters", "Диспетчер параметрів"),
         ("language", "Мова інтерфейсу"),
+        ("hatch", "Штрихування та градієнт"),
     ] {
         let mut app = CadApp::new(Session::new(), Services::default());
         app.ui.interface_language = Preference::Ukrainian;
@@ -366,6 +371,22 @@ fn default_fonts_cover_every_german_special_letter_in_the_catalog() {
     let mut output = ctx.run_ui(Default::default(), |_| {});
     output.textures_delta.clear();
     let letters: BTreeSet<_> = include_str!("de.tsv").chars().filter(|c| ('\u{00c0}'..='\u{00ff}').contains(c)).collect();
+    ctx.fonts_mut(|view| {
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let mut font = view.fonts.font(&family);
+            for c in &letters {
+                assert!(font.characters().contains_key(c), "missing {c} in {family:?}");
+            }
+        }
+    });
+}
+
+#[test]
+fn default_fonts_cover_every_brazilian_portuguese_letter_in_the_catalog() {
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(Default::default(), |_| {});
+    output.textures_delta.clear();
+    let letters: BTreeSet<_> = include_str!("pt_br.tsv").chars().filter(|c| ('\u{00c0}'..='\u{00ff}').contains(c)).collect();
     ctx.fonts_mut(|view| {
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
             let mut font = view.fonts.font(&family);
@@ -525,6 +546,41 @@ fn russian_and_french_plurals() {
     });
 }
 
+#[test]
+fn italian_locales_plurals_and_accents() {
+    for tag in ["it", "it-IT", "it_IT.UTF-8", "IT-ch", " it-CH ", "it_IT@euro"] {
+        assert_eq!(locale_language(tag), Some("it"), "{tag}");
+    }
+    assert_eq!(locale_language("italic"), None);
+    assert_eq!(Preference::parse("it"), Some(Preference::Italian));
+    assert_eq!(Preference::Auto.resolve(&["it-IT".into(), "en-US".into()]), "it");
+    assert_eq!(Preference::Italian.resolve(&["uk-UA".into()]), "it");
+    with_language("it", || {
+        for (n, word) in [(0, "collaboratori"), (1, "collaboratore"), (2, "collaboratori"), (21, "collaboratori")] {
+            assert_eq!(count(n, "{n} contributor", "{n} contributors"), format!("{n} {word}"));
+        }
+        assert_eq!(t("Draw"), "Disegna");
+        assert_eq!(tr_menu("it", "Modify"), "Edita");
+        assert_eq!(tr("it", "Modify"), "Modifica");
+        assert_eq!(tr_menu("it", "View"), "Visualizza");
+        assert_eq!(tr("it", "View"), "Vista");
+    });
+    // Italian accented letters (à è é ì ò ù and capitals) come from the bundled egui fonts.
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(Default::default(), |_| {});
+    output.textures_delta.clear();
+    let letters: BTreeSet<_> = include_str!("it.tsv").chars().filter(|c| ('\u{00c0}'..='\u{00ff}').contains(c)).collect();
+    assert!(letters.contains(&'à') && letters.contains(&'è'));
+    ctx.fonts_mut(|view| {
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            let mut font = view.fonts.font(&family);
+            for c in &letters {
+                assert!(font.characters().contains_key(c), "missing {c} in {family:?}");
+            }
+        }
+    });
+}
+
 /// Chinese shows only with an installed CJK font (none is bundled); without one the interface
 /// stays English instead of drawing boxes, and choosing it says why.
 #[test]
@@ -540,4 +596,9 @@ fn chinese_needs_an_installed_cjk_font() {
     if font.is_none() {
         assert!(app.status.as_ref().is_some_and(|(s, _)| s.contains("No Chinese font")));
     }
+}
+
+#[test]
+fn hatch_dialog_extents_label_says_extents_in_ukrainian() {
+    assert_eq!(tr("uk", "Default to boundary extents"), "Типово за габаритами контуру");
 }

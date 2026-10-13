@@ -22,6 +22,7 @@ mod logging;
 #[cfg(target_os = "macos")]
 mod native_menu;
 mod spacemouse;
+mod system_animations;
 mod workspace;
 
 use cadcraft_engine::Session;
@@ -32,6 +33,8 @@ struct App {
     spacemouse: spacemouse::SpaceMouse,
     /// The desktop's light/dark choice where winit reports none (Linux, the BSDs).
     desktop_theme: desktop_theme::DesktopTheme,
+    /// Whether the OS shows animations, for the System choice of View ▸ Accessibility ▸ Animation Effects.
+    system_animations: system_animations::SystemAnimations,
     workspace: workspace::Workspace,
     workspace_error: Option<String>,
     #[cfg(target_os = "macos")]
@@ -72,6 +75,7 @@ impl eframe::App for App {
                 m.poll(&mut self.cad, ctx);
             }
         }
+        self.cad.system_animations = self.system_animations.current();
         self.cad.logic(ctx);
         self.spacemouse.poll(&mut self.cad, ctx);
         self.persist_workspace(false);
@@ -114,6 +118,11 @@ pub fn install_io() {
     });
     cadcraft_engine::cmd::file::set_write_as(|d, name, o| {
         cadcraft_io::write_with(d, name, &cadcraft_io::SaveOptions { version: o.version, binary: o.binary }).map_err(|e| e.to_string())
+    });
+    // AutoLISP's entget, entmake and entmod see entities as DXF groups.
+    cadcraft_engine::cmd::file::set_entity_codec(cadcraft_engine::cmd::file::EntityCodec {
+        groups: cadcraft_io::entity_groups,
+        entity: cadcraft_io::entity_from_groups,
     });
 }
 
@@ -175,6 +184,9 @@ fn config_dir_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<s
 
 const APP_ID: &str = "ai.storyteller.cadcraft";
 
+/// Stencil bits of the window's render pass (see `NativeOptions::stencil_buffer`).
+const STENCIL_BITS: u8 = 8;
+
 #[cfg(target_os = "macos")]
 const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/cadcraft-macos-512.png");
 #[cfg(not(target_os = "macos"))]
@@ -200,6 +212,19 @@ fn control_port_from(source: &str, value: Option<String>) -> Option<u16> {
     port
 }
 
+/// `--control` followed by `value`: a bare `--control` (last argument) keeps the port already
+/// read from `CADCRAFT_CONTROL_PORT` (`current`) instead of turning the control channel off.
+fn control_flag(current: Option<u16>, value: Option<String>) -> Option<u16> {
+    if value.is_some() {
+        return control_port_from("--control", value);
+    }
+    match current {
+        Some(port) => log::warn!("--control: no port given; using CADCRAFT_CONTROL_PORT ({port})"),
+        None => log::warn!("--control: no port given; the control channel is off"),
+    }
+    current
+}
+
 fn main() -> eframe::Result {
     // First, so every start-up record is captured; see `logging`.
     let logger = logging::install();
@@ -211,7 +236,7 @@ fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--control" => control_port = control_port_from("--control", args.next()),
+            "--control" => control_port = control_flag(control_port, args.next()),
             "--sample" => sample = true,
             "--version" | "-V" => {
                 println!("{}", version_string());
@@ -248,6 +273,8 @@ fn main() -> eframe::Result {
             .with_title_shown(false)
             .with_app_id(APP_ID),
         persist_window: false,
+        // A stencil buffer clips the contents of clipped layout viewports on the GPU.
+        stencil_buffer: STENCIL_BITS,
         ..Default::default()
     };
     if let Some(icon) = app_icon() {
@@ -304,13 +331,20 @@ fn main() -> eframe::Result {
             // Autosave files (SAVEFILEPATH) default to `<settings dir>/autosave`.
             if let Some(dir) = config_dir() {
                 app.enable_autosave(&dir.join("autosave"));
+                // Startup LISP (acad.lsp, acaddoc.lsp) is read from `<settings>/support`; the
+                // folder is made so it is there to put them in.
+                let support = dir.join("support");
+                if let Err(e) = std::fs::create_dir_all(&support) {
+                    log::warn!("no LISP support folder {}: {e}", support.display());
+                }
+                app.session.set_lisp_support_dir(Some(support));
             }
             app.integrated_titlebar = cfg!(target_os = "macos");
             if surface.present_mode == eframe::wgpu::PresentMode::AutoNoVsync {
                 app.frame_cap = Some(cadcraft_ui_egui::gpu::FrameCap::new(240));
             }
             if let Some(rs) = &cc.wgpu_render_state {
-                app.set_wgpu(rs);
+                app.set_wgpu(rs, eframe::egui_wgpu::depth_format_from_bits(0, STENCIL_BITS));
             }
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
@@ -327,8 +361,11 @@ fn main() -> eframe::Result {
             }
             let ctx = cc.egui_ctx.clone();
             let desktop_theme = desktop_theme::DesktopTheme::start(move || ctx.request_repaint());
+            let ctx = cc.egui_ctx.clone();
+            let system_animations = system_animations::SystemAnimations::start(move || ctx.request_repaint());
             Ok(Box::new(App {
                 desktop_theme,
+                system_animations,
                 cad: app,
                 spacemouse: spacemouse::SpaceMouse::start(cc.egui_ctx.clone()),
                 workspace,
@@ -342,7 +379,7 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_dir_from, control_port_from, filters_for_save, follow_desktop};
+    use super::{config_dir_from, control_flag, control_port_from, filters_for_save, follow_desktop};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -374,6 +411,16 @@ mod tests {
         for bad in ["", "abc", "-1", "65536", "99999999999999999999", "\u{0}"] {
             assert_eq!(control_port_from("--control", Some(bad.into())), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn control_without_a_port_keeps_the_environment_port() {
+        // `CADCRAFT_CONTROL_PORT=47321 cadcraft --control` (#844)
+        assert_eq!(control_flag(Some(47321), None), Some(47321));
+        assert_eq!(control_flag(None, None), None);
+        // A port given on the command line still wins over the variable.
+        assert_eq!(control_flag(Some(47321), Some("7979".into())), Some(7979));
+        assert_eq!(control_flag(Some(47321), Some("abc".into())), None);
     }
 
     #[test]

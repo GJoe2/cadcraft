@@ -80,6 +80,59 @@ fn inserts_of_missing_or_empty_blocks_do_not_stretch_extents() {
 }
 
 #[test]
+fn visible_attributes_of_a_missing_block_still_count() {
+    // The renderer draws the attributes of a reference whose definition is missing, so they are
+    // extents and selection targets, as with an empty definition. The insertion point still isn't.
+    let attrib = |invisible: bool| Attrib {
+        tag: "TAG".into(),
+        text: Text {
+            insert: Vec3::new(1000.0, 1000.0, 0.0),
+            align_pt: None,
+            height: 10.0,
+            value: "hello".into(),
+            rotation: 0.0,
+            width_factor: 1.0,
+            oblique: 0.0,
+            style: "Standard".into(),
+            halign: HAlign::Left,
+            valign: VAlign::Baseline,
+        },
+        invisible,
+        constant: false,
+        prompt: String::new(),
+        props: Default::default(),
+        multiline: None,
+        modes: Default::default(),
+    };
+    let ins = |block: &str, attribs: Vec<Attrib>| {
+        Entity::new(
+            Handle(1),
+            EntityKind::Insert(Insert {
+                block: block.into(),
+                insert: Vec3::ZERO,
+                scale: Vec3::new(1.0, 1.0, 1.0),
+                rotation: 0.0,
+                attribs,
+                cols: 1,
+                rows: 1,
+                col_spacing: 0.0,
+                row_spacing: 0.0,
+            }),
+        )
+    };
+    let mut d = Drawing::new_imperial();
+    d.blocks.insert("Empty".into(), std::sync::Arc::new(Block::new("Empty")));
+    let missing = entity_bounds(&d, &ins("Missing", vec![attrib(false)]), 0);
+    let empty = entity_bounds(&d, &ins("Empty", vec![attrib(false)]), 0);
+    assert!(!missing.is_empty());
+    assert_eq!((missing.min, missing.max), (empty.min, empty.max));
+    assert_eq!(missing.min, Vec2::new(1000.0, 1000.0));
+    // Without a visible attribute there is nothing to measure.
+    assert!(entity_bounds(&d, &ins("Missing", vec![]), 0).is_empty());
+    assert!(entity_bounds(&d, &ins("Missing", vec![attrib(true)]), 0).is_empty());
+}
+
+#[test]
 fn transform_arc_mirror_keeps_shape() {
     let mut k = EntityKind::Arc(Arc { center: Vec3::ZERO, radius: 1.0, start: 0.0, end: std::f64::consts::FRAC_PI_2 });
     k.transform(&Mat3::mirror(Vec2::ZERO, Vec2::Y));
@@ -269,6 +322,38 @@ fn extents_pair(d: &Drawing) -> (Vec2, Vec2) {
     (b.min, b.max)
 }
 
+/// #706: block A reaches B once through a chain of 14 blocks (B at depth 15, its line's block E at
+/// 16, past the limit) and once directly (B at depth 1). `children` picks which of the two A holds.
+fn deep_and_shallow(children: &[&str]) -> Drawing {
+    let mut d = Drawing::new_imperial();
+    let mut add = |name: &str, kids: Vec<EntityKind>| {
+        let mut blk = Block::new(name);
+        for (i, k) in kids.into_iter().enumerate() {
+            blk.entities.push(Entity::new(Handle(i as u64 + 1), k));
+        }
+        d.blocks.insert(name.into(), std::sync::Arc::new(blk));
+    };
+    add("E", vec![line((1000.0, 1000.0), (2000.0, 1000.0))]);
+    add("B", vec![plain_insert("E")]);
+    for i in 1..=14 {
+        let next = if i == 14 { "B".to_string() } else { format!("C{}", i + 1) };
+        add(&format!("C{i}"), vec![plain_insert(&next)]);
+    }
+    add("A", children.iter().map(|c| plain_insert(c)).collect());
+    d.add(&Space::Model, Common::default(), plain_insert("A")).unwrap();
+    d
+}
+
+#[test]
+fn deep_block_visit_does_not_hide_a_shallow_reference() {
+    let line = (Vec2::new(1000.0, 1000.0), Vec2::new(2000.0, 1000.0));
+    // Control: past the limit, the deep path alone contributes nothing.
+    assert!(deep_and_shallow(&["C1"]).extents(&Space::Model).is_empty());
+    assert_eq!(extents_pair(&deep_and_shallow(&["B"])), line);
+    assert_eq!(extents_pair(&deep_and_shallow(&["B", "C1"])), line);
+    assert_eq!(extents_pair(&deep_and_shallow(&["C1", "B"])), line);
+}
+
 #[test]
 fn block_entity_with_invisible_flag_is_ignored_in_insert_extents() {
     let mut far = far_line("0");
@@ -354,6 +439,8 @@ fn attdef_in_block_is_ignored_in_insert_extents() {
             constant: false,
             prompt: String::new(),
             props: Default::default(),
+            multiline: None,
+            modes: Default::default(),
         }),
     );
     let d = drawing_with_block(attdef);
@@ -465,4 +552,15 @@ fn invisible_dimblock_entity_is_ignored_in_dimension_extents() {
     let mut d = Drawing::new_imperial();
     dim(&mut d, far_line("0"));
     assert_eq!(d.extents(&Space::Model).max, Vec2::new(6000.0, 6000.0));
+}
+
+#[test]
+fn space_names_its_tab() {
+    assert!(!Space::Model.is_paper());
+    assert_eq!(Space::Model.layout(), None);
+    assert_eq!(Space::Model.tab_name(), "Model");
+    let p = Space::Paper("Sheet A".into());
+    assert!(p.is_paper());
+    assert_eq!(p.layout(), Some("Sheet A"));
+    assert_eq!(p.tab_name(), "Sheet A");
 }

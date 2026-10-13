@@ -474,10 +474,7 @@ fn page_setup(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action 
     };
     let mut layouts: Vec<(u32, String, cadcraft_doc::PageSetup)> = d.layouts.iter().map(|l| (l.tab_order, l.name.clone(), l.page.clone())).collect();
     layouts.sort_by_key(|l| l.0);
-    let shown = match app.session.layout_space() {
-        cadcraft_doc::Space::Paper(n) => Some(n),
-        cadcraft_doc::Space::Model => None,
-    };
+    let shown = app.session.layout_space().layout().map(str::to_string);
     let mut sel = temp::<String>(ctx, "pagesetup_sel")
         .filter(|s| layouts.iter().any(|l| l.1 == *s))
         .or(shown)
@@ -505,7 +502,7 @@ fn page_setup(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action 
             // Layout plotting always prints the whole sheet, so only that area is offered.
             let rows = PageRows { areas: &["layout"], scale: true, center: true };
             egui::Grid::new("pagesetup_grid").num_columns(2).spacing(vec2(10.0, 6.0)).show(right, |ui| {
-                if let Some((k, v)) = page_rows(ui, egui::Id::new(("pagesetup", name)), page, &rows, &choices) {
+                if let Some((k, v)) = page_rows(ui, egui::Id::new(("pagesetup", name)), page, &rows, &choices, None) {
                     action = Some(("pagesetup", json!({ "layout": name, k: v })));
                 }
             });
@@ -583,15 +580,17 @@ fn parse_ratio(t: &str) -> Option<f64> {
 }
 
 /// The page-setup rows (device, paper, orientation, plot area, fit, scale, center, lineweights,
-/// plot style table) shared by the Page Setup Manager and the Plot dialog, inside a two-column
-/// grid. Returns the setting the user changed as a `pagesetup` parameter (`device`, `paper`,
-/// `landscape`, `plotArea`, `scaleToFit`, `scale`, `center`, `lineweights` or `plotStyleTable`).
+/// transparency, plot style table) shared by the Page Setup Manager and the Plot dialog, inside a
+/// two-column grid. Returns the setting the user changed as a `pagesetup` parameter (`device`,
+/// `paper`, `landscape`, `plotArea`, `scaleToFit`, `scale`, `center`, `lineweights`,
+/// `plotTransparency` or `plotStyleTable`).
 fn page_rows(
     ui: &mut egui::Ui,
     salt: egui::Id,
     page: &cadcraft_doc::PageSetup,
     rows: &PageRows,
     choices: &PageChoices,
+    placement: Option<(&mut bool, &mut [f64; 2], bool)>,
 ) -> Option<(&'static str, Value)> {
     let mut change = None;
     ui.label("Printer/plotter");
@@ -658,6 +657,31 @@ fn page_rows(
         change = Some(("scaleToFit", json!(fit)));
     }
     ui.end_row();
+    if let Some((center, offset_mm, supported)) = placement {
+        ui.label("Plot offset");
+        ui.add_enabled_ui(supported, |ui| ui.checkbox(center, "Center the plot")).response.on_hover_text(if supported {
+            "Center the plotted model bounds on the printable area"
+        } else {
+            "Model-space offset placement is not supported by SVG"
+        });
+        ui.end_row();
+        for (i, label) in [(0, "X offset (mm)"), (1, "Y offset (mm)")] {
+            ui.label(label);
+            ui.add_enabled_ui(supported && !*center, |ui| {
+                if let Some(v) = num_field(ui, ("plot_offset", i), offset_mm[i]) {
+                    offset_mm[i] = v;
+                }
+            })
+            .response
+            .on_hover_text("Distance from the printable area's lower-left corner; values range from −100000 to 100000 mm");
+            ui.end_row();
+        }
+        if supported && !*center && offset_mm.iter().any(|v| !v.is_finite() || v.abs() > cadcraft_render::paper::MAX_PLOT_OFFSET_MM) {
+            ui.label("");
+            ui.colored_label(Tokens::get().warn, "Offsets must be within ±100000 mm");
+            ui.end_row();
+        }
+    }
     if rows.scale {
         ui.label("Scale");
         ui.add_enabled_ui(!page.scale_to_fit, |ui| {
@@ -681,6 +705,16 @@ fn page_rows(
     let mut lw = page.lineweights;
     if ui.checkbox(&mut lw, "Plot object lineweights").changed() {
         change = Some(("lineweights", json!(lw)));
+    }
+    ui.end_row();
+    ui.label("");
+    let mut transparency = page.plot_transparency;
+    if ui
+        .checkbox(&mut transparency, "Plot transparency")
+        .on_hover_text("Plot objects with their transparency (PLOTTRANSPARENCYOVERRIDE can override it)")
+        .changed()
+    {
+        change = Some(("plotTransparency", json!(transparency)));
     }
     ui.end_row();
     ui.label("Plot style table");
@@ -728,6 +762,7 @@ fn apply_page_change(page: &mut cadcraft_doc::PageSetup, key: &str, v: &Value) {
                 "scaleToFit" => page.scale_to_fit = b,
                 "center" => page.center = b,
                 "lineweights" => page.lineweights = b,
+                "plotTransparency" => page.plot_transparency = b,
                 _ => {}
             }
         }
@@ -776,6 +811,9 @@ struct PlotState {
     page: cadcraft_doc::PageSetup,
     /// Plot area "window" corners in drawing units: [x1, y1, x2, y2].
     window: [f64; 4],
+    /// Model-space placement; stays outside PageSetup so layouts keep their existing behavior.
+    center: bool,
+    offset_mm: [f64; 2],
 }
 
 /// The page setup a plot of `target` starts from: the layout's, or model-space defaults (fitted
@@ -806,9 +844,11 @@ fn plot_params(st: &PlotState, preview_dpi: Option<f64>) -> Value {
         "landscape": page.landscape,
         "fit": page.scale_to_fit,
         "lineweights": page.lineweights,
+        "plotTransparency": page.plot_transparency,
     });
     if let Some(o) = p.as_object_mut() {
         let device = device_label(page) != "None";
+        let output = cadcraft_engine::cmd::plotters::find_device(&page.device).map_or("pdf", |d| d.output.as_str());
         match preview_dpi {
             // The page's own sheet, so a device's paper and printable area show as they plot.
             Some(dpi) => {
@@ -838,6 +878,12 @@ fn plot_params(st: &PlotState, preview_dpi: Option<f64>) -> Value {
         }
         if st.target == "Model" {
             o.insert("plotArea".into(), json!(page.plot_area));
+            if output != "svg" {
+                o.insert("center".into(), json!(st.center));
+                if !st.center {
+                    o.insert("offset".into(), json!(st.offset_mm));
+                }
+            }
             if !page.scale_to_fit {
                 o.insert("scale".into(), json!(page.scale));
             }
@@ -864,23 +910,30 @@ fn plot(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
     targets.extend(layouts.into_iter().map(|l| l.1));
     let generation = PLOT_GEN.load(Ordering::Relaxed);
     let mut st = temp::<PlotState>(ctx, "plot_state").filter(|s| s.generation == generation && targets.contains(&s.target)).unwrap_or_else(|| {
-        let target = match app.session.layout_space() {
-            cadcraft_doc::Space::Paper(n) => n,
-            cadcraft_doc::Space::Model => "Model".into(),
-        };
+        let target = app.session.layout_space().tab_name().to_string();
         let mut ext = d.extents(&cadcraft_doc::Space::Model);
         if ext.is_empty() {
             ext = cadcraft_geom::Bounds2::new(cadcraft_geom::Vec2::ZERO, cadcraft_geom::Vec2::new(12.0, 9.0));
         }
-        PlotState { generation, page: plot_page(d, &target), target, window: [ext.min.x, ext.min.y, ext.max.x, ext.max.y] }
+        PlotState {
+            generation,
+            page: plot_page(d, &target),
+            target,
+            window: [ext.min.x, ext.min.y, ext.max.x, ext.max.y],
+            center: true,
+            offset_mm: [0.0, 0.0],
+        }
     });
     let model = st.target == "Model";
     let choices = PageChoices::new(ctx, d);
+    let offset_supported =
+        choices.devices.iter().find(|dev| dev.name.eq_ignore_ascii_case(&st.page.device)).is_none_or(|dev| dev.output.as_str() != "svg");
     // Print... in a preview opened from here plots with these settings.
     let mut ok = temp::<bool>(ctx, PLOT_NOW) == Some(true);
     set_temp(ctx, PLOT_NOW, false);
     let (mut cancel, mut action, mut pick, mut preview) = (false, None, false, false);
-    egui::Window::new("Plot").open(open).collapsible(false).resizable(false).show(ctx, |ui| {
+    let center = ctx.content_rect().center();
+    egui::Window::new("Plot").open(open).collapsible(false).resizable(false).pivot(egui::Align2::CENTER_CENTER).default_pos(center).show(ctx, |ui| {
         egui::Grid::new("plot_target").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
             ui.label("Layout");
             egui::ComboBox::from_id_salt("plot_layout").selected_text(st.target.as_str()).width(190.0).show_ui(ui, |ui| {
@@ -901,7 +954,8 @@ fn plot(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
                 } else {
                     PageRows { areas: &["layout"], scale: false, center: false }
                 };
-                if let Some((k, v)) = page_rows(ui, egui::Id::new(("plot", st.target.as_str())), &st.page, &rows, &choices) {
+                let placement = model.then_some((&mut st.center, &mut st.offset_mm, offset_supported));
+                if let Some((k, v)) = page_rows(ui, egui::Id::new(("plot", st.target.as_str())), &st.page, &rows, &choices, placement) {
                     apply_page_change(&mut st.page, k, &v);
                 }
                 if model && st.page.plot_area == "window" {
@@ -933,7 +987,14 @@ fn plot(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
                 let page = &st.page;
                 action = Some((
                     "pagesetup",
-                    json!({ "layout": st.target, "paper": page.paper, "landscape": page.landscape, "scaleToFit": page.scale_to_fit, "lineweights": page.lineweights }),
+                    json!({
+                        "layout": st.target,
+                        "paper": page.paper,
+                        "landscape": page.landscape,
+                        "scaleToFit": page.scale_to_fit,
+                        "lineweights": page.lineweights,
+                        "plotTransparency": page.plot_transparency,
+                    }),
                 ));
             }
             preview = ui.button("Preview").on_hover_text("The sheet as these settings plot it").clicked();
@@ -1085,7 +1146,14 @@ mod plot_dialog_tests {
 
     fn state(target: &str) -> PlotState {
         let d = cadcraft_doc::Drawing::new_metric();
-        PlotState { generation: 0, page: plot_page(&d, target), target: target.into(), window: [0.0, 0.0, 10.0, 10.0] }
+        PlotState {
+            generation: 0,
+            page: plot_page(&d, target),
+            target: target.into(),
+            window: [0.0, 0.0, 10.0, 10.0],
+            center: true,
+            offset_mm: [0.0, 0.0],
+        }
     }
 
     #[test]
@@ -1113,6 +1181,54 @@ mod plot_dialog_tests {
         assert_eq!((p["device"].as_str(), p["paper"].as_str()), (Some("None"), Some(a3)));
         apply_page_change(&mut st.page, "plotStyleTable", &json!("None"));
         assert!(plot_params(&st, None).get("plotStyleTable").is_none());
+    }
+
+    #[test]
+    fn plot_transparency_checkbox_reaches_the_plot() {
+        let mut st = state("Model");
+        assert!(!st.page.plot_transparency, "off by default");
+        assert_eq!(plot_params(&st, None)["plotTransparency"], json!(false));
+        apply_page_change(&mut st.page, "plotTransparency", &json!(true));
+        assert!(st.page.plot_transparency);
+        assert_eq!(plot_params(&st, None)["plotTransparency"], json!(true));
+        // The preview plots it the same way.
+        assert_eq!(plot_params(&st, Some(150.0))["plotTransparency"], json!(true));
+        // Into a layout's page setup and back out to its Plot dialog.
+        let mut s = Session::new();
+        s.execute("pagesetup", &json!({ "layout": "Layout1", "plotTransparency": true })).unwrap();
+        let page = plot_page(s.doc().unwrap(), "Layout1");
+        assert!(page.plot_transparency);
+        apply_page_change(&mut st.page, "plotTransparency", &json!(false));
+        assert_eq!(plot_params(&st, None)["plotTransparency"], json!(false));
+    }
+
+    #[test]
+    fn plot_center_and_offsets_are_model_only_and_omitted_for_svg() {
+        let mut st = state("Model");
+        assert_eq!(plot_params(&st, None)["center"], json!(true));
+        st.center = false;
+        st.offset_mm = [12.5, -7.0];
+        let params = plot_params(&st, None);
+        assert_eq!(params["center"], json!(false));
+        assert_eq!(params["offset"], json!([12.5, -7.0]));
+        let preview = plot_params(&st, Some(150.0));
+        assert_eq!(preview["output"], json!("png"));
+        assert_eq!(preview["offset"], json!([12.5, -7.0]));
+
+        let svg = cadcraft_engine::cmd::plotters::devices().into_iter().find(|dev| dev.output.as_str() == "svg").expect("built-in SVG device");
+        apply_page_change(&mut st.page, "device", &json!(svg.name));
+        let params = plot_params(&st, None);
+        assert!(params.get("center").is_none() && params.get("offset").is_none(), "SVG does not receive unsupported placement options: {params}");
+        let preview = plot_params(&st, Some(150.0));
+        assert!(
+            preview.get("center").is_none() && preview.get("offset").is_none(),
+            "disabled SVG placement controls cannot affect preview output either"
+        );
+
+        st.target = "Layout1".into();
+        st.page = plot_page(&cadcraft_doc::Drawing::new_metric(), "Layout1");
+        let params = plot_params(&st, None);
+        assert!(params.get("center").is_none() && params.get("offset").is_none(), "layout plots retain their page setup mapping");
     }
 
     #[test]
